@@ -6,7 +6,8 @@
 
 use serde_json::{json, Map, Value};
 use swiftbrowse_core::request::op_specs;
-use swiftbrowse_core::{CoreError, Request, SessionManager, SessionOptions};
+use swiftbrowse_core::result::VerificationStatus;
+use swiftbrowse_core::{ActionResult, CoreError, Request, SessionManager, SessionOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -154,19 +155,8 @@ impl McpServer {
                 let result = self.sessions.execute(&id, request).await;
                 let ok = result.ok;
                 let value = serde_json::to_value(&result).unwrap_or_default();
-                // Text snapshots go to the agent as plain text; the full result stays structured.
-                if let Some(text) = value["data"]["text"].as_str().filter(|_| ok && value["data"]["format"] == "text") {
-                    let mut text = text.to_string();
-                    for n in &result.notes {
-                        text.push_str(&format!("note: {n}\n"));
-                    }
-                    return text_result(text, value);
-                }
-                if ok {
-                    tool_ok(value)
-                } else {
-                    tool_result(value, true)
-                }
+                // The agent reads a compact text summary; the full result stays in structuredContent.
+                text_result(render(&result), value, !ok)
             }
         }
     }
@@ -189,11 +179,95 @@ fn tool_error(e: CoreError) -> Value {
     tool_result(json!({ "ok": false, "error": e }), true)
 }
 
-fn text_result(text: String, v: Value) -> Value {
+fn text_result(mut text: String, v: Value, is_error: bool) -> Value {
     if text.len() > MAX_OUTPUT_BYTES {
-        return tool_result(v, false);
+        let mut cut = MAX_OUTPUT_BYTES;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("…[truncated: request a smaller snapshot or use find_element]");
+        return json!({ "content": [{ "type": "text", "text": text }], "isError": is_error });
     }
-    json!({ "content": [{ "type": "text", "text": text }], "structuredContent": v, "isError": false })
+    json!({ "content": [{ "type": "text", "text": text }], "structuredContent": v, "isError": is_error })
+}
+
+/// Compact, agent-facing text for one result. Everything here is also in the
+/// structured result; this only decides what is worth the agent's context.
+pub fn render(r: &ActionResult) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let data = r.data.as_ref();
+    // Snapshots are already text.
+    if let Some(text) = data.filter(|d| d["format"] == "text").and_then(|d| d["text"].as_str()) {
+        out.push_str(text);
+    } else {
+        let _ = write!(out, "{} {}", if r.ok { "ok" } else { "failed" }, r.op);
+        if let Some(t) = &r.target {
+            let _ = write!(out, " {}", t.element.to_line());
+        }
+        let _ = writeln!(out, " ({} ms)", r.timing.duration_ms);
+        if let Some(e) = &r.error {
+            let rec = if e.recoverable { "recoverable" } else { "not recoverable" };
+            let _ = writeln!(
+                out,
+                "error {} ({rec}): {}",
+                serde_json::to_value(e.kind).unwrap_or_default().as_str().unwrap_or(""),
+                e.message
+            );
+            if !e.details.is_null() {
+                let _ = writeln!(out, "details: {}", e.details);
+            }
+        }
+        if let Some(v) = &r.verification {
+            match v.status {
+                VerificationStatus::Passed => {
+                    let kinds: Vec<&str> = v.checks.iter().filter_map(|c| c.condition["type"].as_str()).collect();
+                    let _ = writeln!(out, "verified: {}", kinds.join(", "));
+                }
+                VerificationStatus::NotChecked => out.push_str("not verified: pass `expect` to confirm the outcome\n"),
+                VerificationStatus::Failed => {
+                    for c in v.checks.iter().filter(|c| !c.passed) {
+                        let _ = writeln!(out, "check failed: {} observed {}", c.condition, c.observed);
+                    }
+                }
+            }
+        }
+        match (r.op.as_str(), data) {
+            ("navigate", Some(d)) => {
+                if let Some(status) = d["status"].as_u64() {
+                    let _ = writeln!(out, "status: {status}");
+                }
+            }
+            ("select_option", Some(d)) => {
+                let _ = writeln!(out, "selected: {}", d["selected"]);
+            }
+            ("get_screenshot", Some(d)) => {
+                let _ = writeln!(out, "saved: {}", d["path"].as_str().unwrap_or(""));
+            }
+            // These carry no extra payload beyond target and verification.
+            ("find_element" | "click" | "fill" | "type_text" | "press_key" | "wait_for" | "assert_page_state", _) => {}
+            (_, Some(d)) => {
+                let _ = writeln!(out, "{d}");
+            }
+            (_, None) => {}
+        }
+    }
+    if let Some(p) = &r.page {
+        let url = if p.url.chars().count() > 200 {
+            format!("{}…", p.url.chars().take(200).collect::<String>())
+        } else {
+            p.url.clone()
+        };
+        let _ = writeln!(out, "page: {} | {url}", p.title);
+    }
+    for n in &r.notes {
+        let _ = writeln!(out, "note: {n}");
+    }
+    for e in &r.evidence {
+        let _ = writeln!(out, "evidence: {}", e.path);
+    }
+    out
 }
 
 fn tool_result(v: Value, is_error: bool) -> Value {
@@ -211,15 +285,30 @@ fn tool_result(v: Value, is_error: bool) -> Value {
 }
 
 /// Runs until stdin closes, then closes every session.
+///
+/// A termination signal (SIGTERM, SIGINT, SIGHUP; Ctrl-C on Windows) also ends
+/// the loop, even mid-call, so clients that kill the server don't leak browsers.
 pub async fn serve_stdio(mut server: McpServer) -> std::io::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
-    while let Some(line) = lines.next_line().await? {
+    let terminated = terminate_signal();
+    tokio::pin!(terminated);
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => match line? {
+                Some(line) => line,
+                None => break,
+            },
+            _ = &mut terminated => break,
+        };
         if line.trim().is_empty() {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => server.handle(msg).await,
+            Ok(msg) => tokio::select! {
+                r = server.handle(msg) => r,
+                _ = &mut terminated => break,
+            },
             Err(e) => Some(
                 json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": format!("parse error: {e}") } }),
             ),
@@ -232,6 +321,27 @@ pub async fn serve_stdio(mut server: McpServer) -> std::io::Result<()> {
     }
     server.shutdown().await;
     Ok(())
+}
+
+async fn terminate_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let (Ok(mut term), Ok(mut int), Ok(mut hup)) =
+            (signal(SignalKind::terminate()), signal(SignalKind::interrupt()), signal(SignalKind::hangup()))
+        else {
+            return std::future::pending().await;
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+            _ = hup.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 #[cfg(test)]
@@ -298,10 +408,18 @@ mod tests {
         )
         .await;
         assert_eq!(r["result"]["structuredContent"]["verification"]["status"], "not_checked");
+        // The agent-facing text is a compact summary, not the JSON result.
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("ok click button \"Go\" [e1] ("), "{text}");
+        assert!(text.contains("not verified: pass `expect`"), "{text}");
+        assert!(text.contains("page: A | https://a.test/"), "{text}");
+        assert!(!text.contains('{'), "no JSON in a plain success: {text}");
 
         let r = call(&mut s, 3, "tools/call", json!({ "name": "click", "arguments": { "target": { "by": "auto", "query": "Missing" }, "timeout_ms": 50 } })).await;
         assert_eq!(r["result"]["isError"], true);
         assert_eq!(r["result"]["structuredContent"]["error"]["kind"], "timeout");
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("error timeout (recoverable):"), "{text}");
 
         let r = call(&mut s, 4, "tools/call", json!({ "name": "fill", "arguments": { "nope": 1 } })).await;
         assert_eq!(r["result"]["structuredContent"]["error"]["kind"], "invalid_argument");

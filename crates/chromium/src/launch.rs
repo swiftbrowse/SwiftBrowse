@@ -94,6 +94,38 @@ pub fn needs_no_sandbox() -> bool {
     false
 }
 
+const PROFILE_PREFIX: &str = "swiftbrowse-profile-";
+const OWNER_FILE: &str = ".swiftbrowse-owner";
+
+/// Removes profiles left behind by SwiftBrowse processes that were killed
+/// without cleaning up (e.g. SIGKILL). A profile is removed only when it names
+/// an owner process that no longer exists.
+fn sweep_orphaned_profiles() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(PROFILE_PREFIX) {
+            continue;
+        }
+        let Ok(owner) = std::fs::read_to_string(entry.path().join(OWNER_FILE)) else { continue };
+        let Ok(pid) = owner.trim().parse::<u32>() else { continue };
+        if pid != std::process::id() && !process_alive(pid) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_alive(_pid: u32) -> bool {
+    // Without a cheap portable check, never delete: leaving a stale profile is safe.
+    true
+}
+
 pub struct Launched {
     pub child: Child,
     pub ws_url: String,
@@ -101,10 +133,12 @@ pub struct Launched {
 }
 
 pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[String]) -> Result<Launched> {
+    sweep_orphaned_profiles();
     let profile = tempfile::Builder::new()
-        .prefix("swiftbrowse-profile-")
+        .prefix(PROFILE_PREFIX)
         .tempdir()
         .map_err(|e| CoreError::backend(format!("cannot create profile directory: {e}")))?;
+    let _ = std::fs::write(profile.path().join(OWNER_FILE), std::process::id().to_string());
     let mut cmd = Command::new(exe);
     cmd.arg("--remote-debugging-port=0")
         .arg(format!("--user-data-dir={}", profile.path().display()))
@@ -147,6 +181,18 @@ pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[Strin
     }
     cmd.args(extra);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
+    // If SwiftBrowse dies without cleaning up (SIGKILL, crash), the kernel kills
+    // the browser too instead of leaving it orphaned. The signal follows the
+    // spawning thread, which is a long-lived runtime worker here.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 
     let mut child = cmd.spawn().map_err(|e| CoreError::backend(format!("cannot start {}: {e}", exe.display())))?;
     let stderr = child.stderr.take().expect("piped stderr");

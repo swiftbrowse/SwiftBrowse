@@ -60,6 +60,8 @@ jobs:
         working-directory: bench
       - run: node bench.mjs ../target/release/swiftbrowse --iter 50 --cold 10
         working-directory: bench
+      - run: node agents.mjs ../target/release/swiftbrowse --iter 15 --cold 10
+        working-directory: bench
       - uses: actions/upload-artifact@v4
         with:
           name: bench-results

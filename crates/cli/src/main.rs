@@ -146,13 +146,16 @@ async fn main() -> ExitCode {
             if !no_prewarm {
                 server.prewarm();
             }
-            match swiftbrowse_mcp::serve_stdio(server).await {
-                Ok(()) => ExitCode::SUCCESS,
+            let code = match swiftbrowse_mcp::serve_stdio(server).await {
+                Ok(()) => 0,
                 Err(e) => {
                     eprintln!("swiftbrowse mcp: {e}");
-                    ExitCode::FAILURE
+                    1
                 }
-            }
+            };
+            // Sessions are closed by now. Exit directly: the runtime would otherwise
+            // wait forever on its blocking stdin reader after a signal.
+            std::process::exit(code)
         }
         Command::Capabilities(common) => {
             let steps = vec![("get_capabilities", json!({}))];

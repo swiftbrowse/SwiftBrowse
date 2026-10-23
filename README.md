@@ -38,7 +38,7 @@ Every interface sends the same `Request` and gets the same `ActionResult`. MCP t
 | `get_console_errors` / `get_network_failures` | diagnostics |
 | `get_test_report` / `get_capabilities` | verdict and evidence; backend features |
 
-MCP adds `session_create`, `session_close`, `session_list`. Tools default to a `default` session, which the server starts launching at startup (`--no-prewarm` to disable).
+MCP adds `session_create`, `session_close`, `session_list`. Tool results reach the agent as compact text; the full `ActionResult` is in `structuredContent`. Tools default to a `default` session, which the server starts launching at startup (`--no-prewarm` to disable).
 
 ### Locators
 
@@ -62,10 +62,28 @@ The core retries only failures the backend guarantees happened *before* input re
 - Password values are never echoed in results.
 - Writes go only to the evidence directory, and names are validated.
 - The page helper runs in an isolated JS world, so page scripts can't read or overwrite it.
-- Each session gets its own browser process and a temporary profile, deleted on close or drop.
+- Each session gets its own browser process and a temporary profile, deleted on close or drop. The MCP server cleans up on SIGTERM/SIGINT/SIGHUP. On Linux, browsers also die with a SIGKILLed server (parent-death signal), and the next launch sweeps profiles left by dead owners.
 - Running as root disables Chromium's sandbox (it can't start otherwise). `doctor` and the capability report warn about it; rely on the container boundary.
 
-## Benchmark vs Playwright
+## Agent benchmark vs Playwright MCP
+
+`bench/agents.mjs` drives SwiftBrowse MCP and Playwright MCP 0.0.83 over the same transport (MCP stdio) the way an agent does: take a snapshot, read element refs from it, act, confirm the outcome. It counts wall time, tool calls, and the bytes each tool returns into the agent's context. Playwright MCP runs twice: with its defaults, and tuned with `--timeout-settle 0` (its best case; the default waits 500 ms after each action). Same Chromium, pages, viewport and machine; 15 iterations, 10 interleaved cold starts. All contenders succeeded on every iteration.
+
+| task | SwiftBrowse MCP | Playwright MCP (tuned) | Playwright MCP (defaults) |
+|---|---|---|---|
+| sign-up form: fill ×2, select, check, submit, confirm | **353 ms · 7 calls · 1.0 KB** | 469 ms · 8 calls · 2.3 KB | 1,285 ms · 8 calls · 2.3 KB |
+| 400-row page, look first: snapshot, click "Edit row 250", confirm | **135 ms · 3 calls · 6.6 KB** | 868 ms · 4 calls · 152.6 KB | 1,384 ms · 4 calls · 152.6 KB |
+| 400-row page, direct: click by role and name, confirm | **117 ms · 2 calls · 0.2 KB** | 746 ms · 3 calls · 0.8 KB | 1,263 ms · 3 calls · 0.8 KB |
+| cold start → first page loaded | **378 ms** | 827 ms | 834 ms |
+
+Why it wins, and the caveats:
+- **Context:** snapshots and action results reach the agent as compact text (`ok click button "Sign up" [e12] · verified: text_visible`). The full structured result stays in `structuredContent`. SwiftBrowse snapshots are bounded (150 elements), while Playwright MCP's `browser_snapshot` returns the whole page. On the 400-row page that's 6.6 KB vs 152.6 KB, though the bounded snapshot doesn't contain row 250. The agent has to locate it, which the snapshot itself tells it to do.
+- **Calls:** `click` with `expect` acts and confirms in one call; Playwright MCP needs a separate `browser_wait_for`.
+- Medians from one machine and two synthetic pages. The task flows are in `bench/agents.mjs`, and neither server was tuned per task. Results: `bench/results/agents-*.json`.
+
+Run it: `cd bench && npm install && node agents.mjs ../target/release/swiftbrowse --iter 15 --cold 10`.
+
+## Benchmark vs the Playwright library
 
 `bench/bench.mjs` runs identical tasks with Playwright 1.64.0 (library API) and SwiftBrowse (through MCP over stdio). Both use the same Chromium binary, local pages and viewport, with warm-ups discarded. Its header lists the fairness rules; keep them when changing it.
 
@@ -101,7 +119,7 @@ Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse
 | Chromium backend (`crates/chromium`) | CDP over WebSocket, per-session process + profile, isolated-world helper, trusted input, diagnostics, screenshots, AX tree |
 | MCP server (`crates/mcp`) | stdio, protocol 2024-11-05 / 2025-03-26 / 2025-06-18, generated schemas, output bounded to 256 KB |
 | CLI (`crates/cli`) | `doctor`, `capabilities`, `run`, `snapshot`, `screenshot`, `mcp` |
-| Tests | 23 core/MCP unit and engine tests, 4 real-browser integration suites, 1 key-mapping test |
+| Tests | 23 core/MCP unit and engine tests, 4 real-browser integration suites, 1 signal-cleanup test of the real binary, 1 key-mapping test |
 | CI (`.github/workflows/ci.yml`) | written, **not yet run** |
 | Desktop shell (Tauri/Wry) | not started; `doctor` reports WebView availability |
 | Remote/authenticated MCP transport | not started |
