@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><title>Sign up</title></head>
+<body>
+<h1>Create account</h1>
+<form id="f" novalidate>
+  <label for="email">Email</label> <input id="email" type="email" required>
+  <label>Password <input id="pw" type="password"></label>
+  <label for="country">Country</label>
+  <select id="country"><option value="">Choose</option><option value="nl">Netherlands</option><option value="de">Germany</option></select>
+  <label><input type="checkbox" id="agree"> I agree to the terms</label>
+  <input type="date" aria-label="Birthday" id="bday">
+  <textarea aria-label="Bio"></textarea>
+  <button type="submit">Sign up</button>
+</form>
+<p id="err" role="alert" hidden></p>
+<div role="status" id="ok"></div>
+<script>
+document.getElementById('f').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const email = document.getElementById('email').value;
+  const err = document.getElementById('err');
+  if (!email.includes('@') || !document.getElementById('agree').checked) {
+    err.hidden = false; err.textContent = 'Please enter a valid email and accept the terms';
+    return;
+  }
+  err.hidden = true;
+  setTimeout(() => {
+    history.pushState({}, '', '/welcome');
+    document.getElementById('ok').textContent = 'Welcome, ' + email + ' from ' + document.getElementById('country').value;
+  }, 200);
+});
+</script>
+</body></html>

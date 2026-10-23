@@ -1,0 +1,14 @@
+{
+  "name": "signup form (data: URL fixture)",
+  "steps": [
+    { "op": "navigate", "url": "data:text/html,<title>Demo</title><label for=e>Email</label><input id=e><button onclick=\"document.querySelector('p').hidden=false\">Save</button><p hidden role=status>Saved</p>" },
+    { "op": "fill", "target": { "by": "label", "text": "Email" }, "value": "ada@example.com" },
+    { "op": "click", "target": { "by": "role", "role": "button", "name": "Save" },
+      "expect": { "type": "text_visible", "text": "Saved" } },
+    { "op": "assert_page_state", "name": "saved and value kept", "conditions": [
+      { "type": "visible", "target": { "by": "role", "role": "status" } },
+      { "type": "value_equals", "target": { "by": "label", "text": "Email" }, "value": "ada@example.com" },
+      { "type": "no_console_errors" }
+    ] }
+  ]
+}

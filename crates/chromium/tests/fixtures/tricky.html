@@ -1,0 +1,51 @@
+<!doctype html>
+<html><head><title>Tricky</title>
+<style>
+  #overlay[hidden] { display: none; }
+  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); }
+  .mobile { display: none; }
+  @keyframes slide { from { transform: translateX(600px); } to { transform: none; } }
+  .sliding { animation: slide 400ms linear forwards; }
+</style></head>
+<body>
+<h1>Orders</h1>
+<ul id="rows">
+  <li>Order 1 <button onclick="this.parentElement.remove()">Delete</button></li>
+  <li>Order 2 <button onclick="this.parentElement.remove()">Delete</button></li>
+</ul>
+<nav><button class="mobile">Menu</button><button onclick="document.getElementById('menu').hidden=false">Menu</button></nav>
+<div id="menu" hidden><a href="/form">Account settings</a></div>
+<button onclick="const o=document.getElementById('overlay'); o.hidden=false; setTimeout(() => o.hidden=true, 400)">Show overlay</button>
+<button id="covered" onclick="document.title='covered clicked'">Under overlay</button>
+<button data-testid="checkout" onclick="document.getElementById('placed').hidden=false">Place order</button>
+<p id="placed" hidden>Order placed</p>
+<button onclick="document.getElementById('answer').textContent = confirm('Really?') ? 'yes' : 'no'">Ask</button>
+<span id="answer"></span>
+<button onclick="renderList()">Refresh list</button>
+<button onclick="const b=document.getElementById('slider'); b.classList.add('sliding'); b.hidden=false">Start slide</button>
+<button id="slider" hidden onclick="this.textContent='Slid'">Slider</button>
+<ol id="list"></ol>
+<x-widget></x-widget>
+<div id="overlay" hidden></div>
+<script>
+  function renderList() {
+    document.getElementById('list').innerHTML = '<li><button>Item A</button></li>';
+  }
+  renderList();
+  customElements.define('x-widget', class extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = '<button onclick="this.textContent=\'Shadow done\'">Shadow action</button>';
+    }
+  });
+  setTimeout(() => {
+    const b = document.createElement('button');
+    b.textContent = 'Late button';
+    b.onclick = () => { b.textContent = 'Late clicked'; };
+    document.body.appendChild(b);
+  }, 400);
+  console.error('boom from page');
+  fetch('/missing.json').catch(() => {});
+  window.__sb = 'page cannot clobber the helper';
+</script>
+</body></html>

@@ -1,0 +1,8 @@
+{
+  "name": "swiftbrowse-bench",
+  "private": true,
+  "type": "module",
+  "description": "SwiftBrowse vs Playwright on identical tasks, same Chromium binary",
+  "scripts": { "bench": "node bench.mjs" },
+  "dependencies": { "playwright-core": "1.64.0" }
+}

@@ -1,0 +1,169 @@
+//! Page-level data shapes returned by backends.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// One element as seen by the automation layer. `ref_id` is a session-scoped
+/// handle that stays valid until the element is detached or the document changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ElementInfo {
+    #[serde(rename = "ref")]
+    pub ref_id: String,
+    pub tag: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
+    /// Omitted when true.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub visible: bool,
+    /// Omitted when true.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    /// Omitted when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editable: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PageState {
+    pub url: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Heading {
+    pub level: u8,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Message {
+    pub kind: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "ref")]
+    pub ref_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PageSnapshot {
+    pub url: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headings: Vec<Heading>,
+    /// Visible interactive elements (or all elements in full mode), bounded by `max_elements`.
+    pub elements: Vec<ElementInfo>,
+    /// Open dialogs, alerts, live regions and validation messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<Message>,
+    pub total_elements: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotDiff {
+    pub url_changed: bool,
+    pub title_changed: bool,
+    pub added: Vec<ElementInfo>,
+    pub removed: Vec<String>,
+    pub changed: Vec<ElementInfo>,
+    pub messages_changed: bool,
+}
+
+impl PageSnapshot {
+    pub fn diff_from(&self, prev: &PageSnapshot) -> SnapshotDiff {
+        use std::collections::HashMap;
+        let old: HashMap<&str, &ElementInfo> = prev.elements.iter().map(|e| (e.ref_id.as_str(), e)).collect();
+        let new: HashMap<&str, &ElementInfo> = self.elements.iter().map(|e| (e.ref_id.as_str(), e)).collect();
+        SnapshotDiff {
+            url_changed: self.url != prev.url,
+            title_changed: self.title != prev.title,
+            added: self.elements.iter().filter(|e| !old.contains_key(e.ref_id.as_str())).cloned().collect(),
+            removed: prev
+                .elements
+                .iter()
+                .filter(|e| !new.contains_key(e.ref_id.as_str()))
+                .map(|e| e.ref_id.clone())
+                .collect(),
+            changed: self
+                .elements
+                .iter()
+                .filter(|e| old.get(e.ref_id.as_str()).is_some_and(|o| *o != *e))
+                .cloned()
+                .collect(),
+            messages_changed: self.messages != prev.messages,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NavigationInfo {
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    pub same_document: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConsoleEntry {
+    pub level: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NetworkFailure {
+    pub url: String,
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub resource_type: String,
+    pub timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DialogEvent {
+    pub kind: String,
+    pub message: String,
+    /// What the backend did with it: "accepted" or "dismissed".
+    pub handled: String,
+    pub timestamp_ms: u64,
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
