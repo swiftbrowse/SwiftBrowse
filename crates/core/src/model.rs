@@ -49,6 +49,57 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+impl ElementInfo {
+    /// One-line rendering used by the text snapshot format.
+    pub fn to_line(&self) -> String {
+        use std::fmt::Write;
+        let mut s = self.role.clone().unwrap_or_else(|| self.tag.clone());
+        if !self.name.is_empty() {
+            let _ = write!(s, " {:?}", clip(&self.name, 80));
+        }
+        let _ = write!(s, " [{}]", self.ref_id);
+        if let Some(t) =
+            self.input_type.as_deref().filter(|t| !matches!(*t, "text" | "checkbox" | "radio" | "submit" | "button"))
+        {
+            let _ = write!(s, " type={t}");
+        }
+        let toggle = matches!(self.input_type.as_deref(), Some("checkbox" | "radio"));
+        if let Some(v) = self.value.as_deref().filter(|v| !v.is_empty() && !toggle) {
+            let _ = write!(s, " value={:?}", clip(v, 60));
+        }
+        match self.checked {
+            Some(true) => s.push_str(" checked"),
+            Some(false) => s.push_str(" unchecked"),
+            None => {}
+        }
+        if !self.enabled {
+            s.push_str(" disabled");
+        }
+        if !self.visible {
+            s.push_str(" hidden");
+        }
+        if let Some(id) = &self.test_id {
+            let _ = write!(s, " testid={id:?}");
+        }
+        if let Some(h) = &self.href {
+            let _ = write!(s, " -> {}", clip(h, 80));
+        }
+        if !self.text.is_empty() && self.text != self.name {
+            let _ = write!(s, ": {}", clip(&self.text, 60));
+        }
+        s
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PageState {
     pub url: String,
@@ -95,7 +146,67 @@ pub struct SnapshotDiff {
     pub messages_changed: bool,
 }
 
+impl SnapshotDiff {
+    /// Text rendering: `+` added, `~` changed, `-` removed refs; messages are repeated in full.
+    pub fn to_text(&self, now: &PageSnapshot) -> String {
+        let mut out = String::new();
+        if self.url_changed || self.title_changed {
+            out.push_str(&now.header());
+        }
+        for e in &self.added {
+            out.push_str(&format!("+ {}\n", e.to_line()));
+        }
+        for e in &self.changed {
+            out.push_str(&format!("~ {}\n", e.to_line()));
+        }
+        if !self.removed.is_empty() {
+            out.push_str(&format!("- {}\n", self.removed.join(" ")));
+        }
+        now.messages_text(&mut out);
+        if out.is_empty() {
+            out.push_str("no changes\n");
+        }
+        out
+    }
+}
+
 impl PageSnapshot {
+    fn header(&self) -> String {
+        format!("page: {} | {}\n", clip(&self.title, 100), clip(&self.url, 200))
+    }
+
+    fn messages_text(&self, out: &mut String) {
+        for m in &self.messages {
+            out.push_str(&format!("! {}: {}", m.kind, clip(&m.text, 200)));
+            if let Some(r) = &m.ref_id {
+                out.push_str(&format!(" [{r}]"));
+            }
+            out.push('\n');
+        }
+    }
+
+    /// Compact text rendering: header, headings, one line per element, messages.
+    pub fn to_text(&self) -> String {
+        let mut out = self.header();
+        if !self.headings.is_empty() {
+            let hs: Vec<String> = self.headings.iter().map(|h| format!("h{} {}", h.level, clip(&h.text, 80))).collect();
+            out.push_str(&format!("headings: {}\n", hs.join("; ")));
+        }
+        for e in &self.elements {
+            out.push_str(&e.to_line());
+            out.push('\n');
+        }
+        self.messages_text(&mut out);
+        if self.truncated {
+            out.push_str(&format!(
+                "… {} of {} elements shown; use find_element for others\n",
+                self.elements.len(),
+                self.total_elements
+            ));
+        }
+        out
+    }
+
     pub fn diff_from(&self, prev: &PageSnapshot) -> SnapshotDiff {
         use std::collections::HashMap;
         let old: HashMap<&str, &ElementInfo> = prev.elements.iter().map(|e| (e.ref_id.as_str(), e)).collect();

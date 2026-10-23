@@ -1,6 +1,6 @@
 # SwiftBrowse vs Playwright
 
-- **date**: 2026-10-23T20:07:18.239Z
+- **date**: 2026-10-23T21:59:12.001Z
 - **cpu**: Intel(R) Xeon(R) Processor @ 2.10GHz x4
 - **memory_gb**: 15.7
 - **os**: Linux 6.18.44-fc-v153
@@ -20,23 +20,23 @@ Times in ms. Lower is better. Ratio = SwiftBrowse p50 / Playwright p50 (< 1 mean
 
 | task | step | SwiftBrowse p50 | p95 | Playwright p50 | p95 | ratio |
 |---|---|---:|---:|---:|---:|---:|
-| cold_start | launch_to_loaded_page | 414.97 | 502.75 | 441.01 | 476.37 | 0.94 |
-| form_task | navigate | 33.59 | 44.39 | 35.65 | 46.08 | 0.94 |
-| form_task | fill_email | 9.66 | 15.39 | 44.26 | 63.26 | 0.22 |
-| form_task | fill_password | 8.77 | 14.59 | 12.46 | 17.96 | 0.70 |
-| form_task | select | 4.84 | 9.97 | 8.91 | 12.97 | 0.54 |
-| form_task | check | 22.34 | 28.46 | 47.38 | 54.24 | 0.47 |
-| form_task | submit_and_wait | 288.01 | 300.62 | 342.83 | 351.02 | 0.84 |
-| form_task | total | 367.09 | 393.99 | 488.04 | 525.89 | 0.75 |
-| snapshot_form | snapshot | 1.94 | 2.94 | 7.29 | 16.03 | 0.27 |
-| snapshot_large | snapshot | 17.08 | 25.41 | 141.13 | 176.13 | 0.12 |
-| semantic_lookup_large | role_and_name | 3.65 | 4.99 | 18.89 | 27.77 | 0.19 |
+| cold_start | launch_to_loaded_page | 389.45 | 462.27 | 370.76 | 398.11 | 1.05 |
+| form_task | navigate | 31.73 | 42.67 | 30.58 | 35.96 | 1.04 |
+| form_task | fill_email | 8.64 | 12.73 | 38.05 | 47.91 | 0.23 |
+| form_task | fill_password | 7.7 | 11.57 | 9.2 | 13.08 | 0.84 |
+| form_task | select | 4.85 | 7.97 | 7.51 | 10.07 | 0.65 |
+| form_task | check | 16.72 | 28.51 | 43.12 | 52.04 | 0.39 |
+| form_task | submit_and_wait | 287.22 | 294.09 | 338.7 | 344.87 | 0.85 |
+| form_task | total | 361.8 | 378.36 | 467.48 | 484.71 | 0.77 |
+| snapshot_form | snapshot | 1.77 | 2.49 | 6.54 | 8.35 | 0.27 |
+| snapshot_large | snapshot | 14.56 | 21.18 | 147.96 | 202.53 | 0.10 |
+| semantic_lookup_large | role_and_name | 3.26 | 4.34 | 18.16 | 22.11 | 0.18 |
 
 ## Snapshot output size (bytes an agent receives)
 
 | page | SwiftBrowse compact | Playwright ariaSnapshot | note |
 |---|---:|---:|---|
-| snapshot_form | 972 | 349 | both complete |
-| snapshot_large | 14724 | 125549 | SwiftBrowse output bounded to 150 elements (truncated=true); Playwright output is the full tree |
+| snapshot_form | 288 | 349 | both complete |
+| snapshot_large | 6400 | 125549 | SwiftBrowse output bounded to 150 elements (truncated=true); Playwright output is the full tree |
 
-Snapshots are different formats (structured JSON with refs vs. YAML-like ARIA text); sizes compare what each puts into an agent's context, not equivalent information.
+Snapshots are different formats (SwiftBrowse line-per-element text with refs and URL vs. Playwright YAML-like ARIA text without refs); sizes compare what each puts into an agent's context, not equivalent information.

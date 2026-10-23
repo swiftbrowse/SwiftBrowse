@@ -229,9 +229,9 @@ async fn policy_and_validation_errors() {
 #[tokio::test]
 async fn snapshot_diff_reports_changes() {
     let (mut mgr, _f, id) = setup().await;
-    run(&mut mgr, &id, "get_page_snapshot", json!({})).await;
+    run(&mut mgr, &id, "get_page_snapshot", json!({ "format": "json" })).await;
     run(&mut mgr, &id, "click", json!({ "target": { "by": "auto", "query": "Reveal" } })).await;
-    let r = run(&mut mgr, &id, "get_page_snapshot", json!({ "since_last": true })).await;
+    let r = run(&mut mgr, &id, "get_page_snapshot", json!({ "since_last": true, "format": "json" })).await;
     let added = &r.data.unwrap()["diff"]["added"];
     assert_eq!(added.as_array().unwrap().len(), 1);
     assert_eq!(added[0]["ref"], "e12");
@@ -249,4 +249,25 @@ async fn session_limit_and_cleanup() {
     assert!(mgr.create(Some("../bad".into()), &SessionOptions::default()).await.is_err());
     mgr.close_all().await;
     assert!(mgr.list().is_empty());
+}
+
+#[tokio::test]
+async fn text_snapshot_is_compact_and_diffable() {
+    let (mut mgr, _f, id) = setup().await;
+    let r = run(&mut mgr, &id, "get_page_snapshot", json!({})).await;
+    let data = r.data.unwrap();
+    assert_eq!(data["format"], "text");
+    let text = data["text"].as_str().unwrap();
+    assert!(text.starts_with("page: Home | https://app.test/\n"), "{text}");
+    assert!(text.contains("button \"Delete\" [e1]\n"), "{text}");
+    assert!(text.contains("textbox \"Email\" [e6]\n"), "{text}");
+    assert!(text.contains("button \"Continue\" [e7] testid=\"next\""), "{text}");
+    assert!(text.contains("button \"Disabled\" [e10] disabled"), "{text}");
+    assert!(!text.contains("[e3]"), "hidden elements are not in compact snapshots: {text}");
+
+    run(&mut mgr, &id, "click", json!({ "target": { "by": "auto", "query": "Reveal" } })).await;
+    let r = run(&mut mgr, &id, "get_page_snapshot", json!({ "since_last": true })).await;
+    assert_eq!(r.data.unwrap()["text"], "+ alert \"Saved!\" [e12]\n");
+    let r = run(&mut mgr, &id, "get_page_snapshot", json!({ "since_last": true })).await;
+    assert_eq!(r.data.unwrap()["text"], "no changes\n");
 }

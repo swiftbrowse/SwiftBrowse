@@ -154,6 +154,14 @@ impl McpServer {
                 let result = self.sessions.execute(&id, request).await;
                 let ok = result.ok;
                 let value = serde_json::to_value(&result).unwrap_or_default();
+                // Text snapshots go to the agent as plain text; the full result stays structured.
+                if let Some(text) = value["data"]["text"].as_str().filter(|_| ok && value["data"]["format"] == "text") {
+                    let mut text = text.to_string();
+                    for n in &result.notes {
+                        text.push_str(&format!("note: {n}\n"));
+                    }
+                    return text_result(text, value);
+                }
                 if ok {
                     tool_ok(value)
                 } else {
@@ -179,6 +187,13 @@ fn tool_ok(v: Value) -> Value {
 
 fn tool_error(e: CoreError) -> Value {
     tool_result(json!({ "ok": false, "error": e }), true)
+}
+
+fn text_result(text: String, v: Value) -> Value {
+    if text.len() > MAX_OUTPUT_BYTES {
+        return tool_result(v, false);
+    }
+    json!({ "content": [{ "type": "text", "text": text }], "structuredContent": v, "isError": false })
 }
 
 fn tool_result(v: Value, is_error: bool) -> Value {
@@ -268,6 +283,12 @@ mod tests {
             .await;
         assert_eq!(r["result"]["isError"], false, "{r}");
         assert_eq!(r["result"]["structuredContent"]["session_id"], "default");
+
+        // Text snapshots reach the agent as plain text; structure stays in structuredContent.
+        let r = call(&mut s, 9, "tools/call", json!({ "name": "get_page_snapshot", "arguments": {} })).await;
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("page: A | https://a.test/\nbutton \"Go\" [e1]"), "{text}");
+        assert_eq!(r["result"]["structuredContent"]["data"]["format"], "text");
 
         let r = call(
             &mut s,

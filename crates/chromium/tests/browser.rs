@@ -87,7 +87,7 @@ async fn form_flow_is_verified_end_to_end() {
     assert_eq!(nav.data.as_ref().unwrap()["status"], 200);
     assert_eq!(nav.page.as_ref().unwrap().title, "Sign up");
 
-    let snap = h.ok("get_page_snapshot", json!({})).await.data.unwrap();
+    let snap = h.ok("get_page_snapshot", json!({ "format": "json" })).await.data.unwrap();
     assert_eq!(snap["headings"][0]["text"], "Create account");
     let names: Vec<&str> = snap["elements"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
     for want in ["Email", "Password", "Country", "I agree to the terms", "Birthday", "Bio", "Sign up"] {
@@ -116,7 +116,7 @@ async fn form_flow_is_verified_end_to_end() {
     assert_eq!(kind(&r), ErrorKind::VerificationFailed);
     assert!(!r.evidence.is_empty(), "failure should capture a screenshot");
     assert!(std::path::Path::new(&r.evidence[0].path).exists());
-    let snap = h.ok("get_page_snapshot", json!({})).await.data.unwrap();
+    let snap = h.ok("get_page_snapshot", json!({ "format": "json" })).await.data.unwrap();
     assert!(snap["messages"]
         .as_array()
         .unwrap()
@@ -222,7 +222,7 @@ async fn approval_dialogs_stale_refs_and_diagnostics() {
         "expect": { "type": "text_visible", "text": "no" } }),
     )
     .await;
-    let snap = h.ok("get_page_snapshot", json!({})).await.data.unwrap();
+    let snap = h.ok("get_page_snapshot", json!({ "format": "json" })).await.data.unwrap();
     assert!(snap["messages"].as_array().unwrap().iter().any(|m| m["kind"] == "js_dialog"));
 
     let found = h.ok("find_element", json!({ "target": { "by": "text", "text": "Item A", "exact": true } })).await;

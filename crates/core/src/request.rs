@@ -90,11 +90,23 @@ pub struct NavigateArgs {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotFormat {
+    /// One line per element, e.g. `textbox "Email" [e3] type=email`. Smallest for agent context.
+    #[default]
+    Text,
+    /// Structured objects, for programmatic consumers.
+    Json,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotArgs {
     #[serde(default)]
     pub mode: SnapshotMode,
+    #[serde(default)]
+    pub format: SnapshotFormat,
     /// Return only what changed since this session's previous snapshot.
     #[serde(default)]
     pub since_last: bool,

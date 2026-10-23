@@ -28,7 +28,7 @@ Every interface sends the same `Request` and gets the same `ActionResult`. MCP t
 | op | does |
 |---|---|
 | `navigate` | open URL, wait for `load` / `dom_content_loaded` / `network_idle`, report HTTP status |
-| `get_page_snapshot` | compact view: headings, visible interactive elements with `ref`s, dialogs/alerts/validation; `since_last` returns a diff |
+| `get_page_snapshot` | compact view: headings, visible interactive elements with `ref`s, dialogs/alerts/validation. Default `format: "text"` is one line per element (`textbox "Email" [e3] type=email`); `format: "json"` gives objects; `since_last` returns a `+`/`~`/`-` diff |
 | `get_accessibility_tree` | bounded browser AX tree |
 | `find_element` | resolve a locator (or `all: true`) |
 | `click` | actionability checks, approval gate, optional `expect` verification |
@@ -69,24 +69,26 @@ The core retries only failures the backend guarantees happened *before* input re
 
 `bench/bench.mjs` runs identical tasks with Playwright 1.64.0 (library API) and SwiftBrowse (through MCP over stdio). Both use the same Chromium binary, local pages and viewport, with warm-ups discarded. Its header lists the fairness rules; keep them when changing it.
 
-Latest run: 4× Xeon 2.1 GHz cloud container, Chrome for Testing 153.0.8010.12, 50 iterations, 10 cold runs, both run orders. p50 in ms:
+Latest run: 4× Xeon 2.1 GHz cloud container, Chrome for Testing 153.0.8010.12, 50 iterations, 10 cold runs, both run orders (SwiftBrowse-first / Playwright-first). p50 in ms:
 
 | task | SwiftBrowse | Playwright | ratio |
 |---|---:|---:|---:|
-| cold start → loaded page | 415 / 443 | 441 / 428 | 0.94 / 1.04 (tie) |
-| navigate | 33.6 / 33.9 | 35.7 / 32.3 | 0.94 / 1.05 (tie) |
-| fill (email) | 9.7 | 44.3 | 0.22 |
-| click (checkbox label) | 22.3 | 47.4 | 0.47 |
-| submit + wait for result | 288 | 343 | 0.84 |
-| **form task total** | **367** | **488** | **0.75** |
-| snapshot, small page | 1.9 | 7.3 | 0.27 |
-| snapshot, 400-row page | 17.1 | 141 | 0.12 |
-| role+name lookup, 400-row page | 3.7 | 18.9 | 0.19 |
+| cold start → loaded page | 389 / 463 | 371 / 393 | 1.05 / 1.18 (near parity; noisy, n=10) |
+| navigate | 31.7 / 32.9 | 30.6 / 31.0 | 1.04 / 1.06 (near parity) |
+| fill (email) | 8.6 | 38.1 | 0.23 |
+| click (checkbox label) | 16.7 | 43.1 | 0.39 |
+| submit + wait for result | 287 | 339 | 0.85 |
+| **form task total** | **362 / 364** | **467 / 467** | **0.77 / 0.78** |
+| snapshot, small page | 1.8 | 6.5 | 0.27 |
+| snapshot, 400-row page | 14.6 | 148 | 0.10 |
+| role+name lookup, 400-row page | 3.3 | 18.2 | 0.18 |
+
+Snapshot output an agent receives (bytes): small page **288 vs 349**; 400-row page 6,400 vs 125,549.
 
 Read these with care:
 - SwiftBrowse does *more* work in some steps: `fill` reads the value back to verify it, and `navigate` reads the real title. Playwright's `goto` returns neither.
-- The snapshot comparison is compact JSON with refs vs. `ariaSnapshot()` YAML. **On the small page SwiftBrowse's output is larger (972 vs 349 bytes).** On the large page it is bounded to 150 elements and truncated, so the 14.7 KB vs 125 KB sizes aren't equivalent content.
-- One machine and one fixture set. Cold start and navigate are within run-to-run noise. Full tables: `bench/results/`.
+- Snapshots differ in format: SwiftBrowse sends line-per-element text with refs and the URL; Playwright's `ariaSnapshot()` is YAML without refs. On the large page SwiftBrowse is bounded to 150 elements, so those two sizes aren't equivalent content.
+- One machine and one fixture set. Cold start and navigate move by ±10% between runs. Full tables: `bench/results/`.
 
 Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse --iter 50 --cold 10 [--order playwright-first]`.
 
@@ -98,7 +100,7 @@ Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse
 | Chromium backend (`crates/chromium`) | CDP over WebSocket, per-session process + profile, isolated-world helper, trusted input, diagnostics, screenshots, AX tree |
 | MCP server (`crates/mcp`) | stdio, protocol 2024-11-05 / 2025-03-26 / 2025-06-18, generated schemas, output bounded to 256 KB |
 | CLI (`crates/cli`) | `doctor`, `capabilities`, `run`, `snapshot`, `screenshot`, `mcp` |
-| Tests | 22 core/MCP unit and engine tests, 4 real-browser integration suites, 1 key-mapping test |
+| Tests | 23 core/MCP unit and engine tests, 4 real-browser integration suites, 1 key-mapping test |
 | CI (`.github/workflows/ci.yml`) | written, **not yet run** |
 | Desktop shell (Tauri/Wry) | not started; `doctor` reports WebView availability |
 | Remote/authenticated MCP transport | not started |

@@ -239,14 +239,29 @@ impl Session {
                         snap.total_elements
                     ));
                 }
-                let data = match (&self.last_snapshot, a.since_last) {
-                    (Some(prev), true) => json!({
+                let data = match (&self.last_snapshot, a.since_last, a.format) {
+                    (Some(prev), true, SnapshotFormat::Text) => json!({
+                        "format": "text",
+                        "text": snap.diff_from(prev).to_text(&snap),
+                    }),
+                    (None, _, SnapshotFormat::Text) | (Some(_), false, SnapshotFormat::Text) => {
+                        if a.since_last {
+                            ctx.notes.push("no previous snapshot in this document; returned a full snapshot".into());
+                        }
+                        json!({
+                            "format": "text",
+                            "text": snap.to_text(),
+                            "total_elements": snap.total_elements,
+                            "truncated": snap.truncated,
+                        })
+                    }
+                    (Some(prev), true, SnapshotFormat::Json) => json!({
                         "url": snap.url,
                         "title": snap.title,
                         "diff": snap.diff_from(prev),
                         "messages": snap.messages,
                     }),
-                    _ => {
+                    (_, _, SnapshotFormat::Json) => {
                         if a.since_last {
                             ctx.notes.push("no previous snapshot in this document; returned a full snapshot".into());
                         }

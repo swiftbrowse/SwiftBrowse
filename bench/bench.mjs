@@ -69,7 +69,8 @@ class SwiftBrowse {
     const r = (await this.rpc('tools/call', { name, arguments: a })).result;
     const text = r.content[0].text;
     if (r.isError) throw new Error(`${name} failed: ${text.slice(0, 400)}`);
-    return { data: JSON.parse(text), bytes: Buffer.byteLength(text) };
+    // `bytes` is what the agent's context receives (the text content).
+    return { data: r.structuredContent ?? JSON.parse(text), bytes: Buffer.byteLength(text) };
   }
   async stop() {
     this.proc.stdin.end();
@@ -218,7 +219,7 @@ md += `\n## Snapshot output size (bytes an agent receives)\n\n| page | SwiftBrow
 for (const [k, v] of Object.entries(sizes)) {
   md += `| ${k} | ${v.swiftbrowse} | ${v.playwright} | ${v.swiftbrowse_truncated ? 'SwiftBrowse output bounded to 150 elements (truncated=true); Playwright output is the full tree' : 'both complete'} |\n`;
 }
-md += `\nSnapshots are different formats (structured JSON with refs vs. YAML-like ARIA text); sizes compare what each puts into an agent's context, not equivalent information.\n`;
+md += `\nSnapshots are different formats (SwiftBrowse line-per-element text with refs and URL vs. Playwright YAML-like ARIA text without refs); sizes compare what each puts into an agent's context, not equivalent information.\n`;
 fs.mkdirSync(OUT, { recursive: true });
 const stamp = env.date.replace(/[:.]/g, '-');
 fs.writeFileSync(path.join(OUT, `${stamp}.json`), JSON.stringify({ env, summary, sizes, raw: results }, null, 2));
