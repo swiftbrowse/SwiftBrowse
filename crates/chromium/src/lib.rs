@@ -66,6 +66,8 @@ impl BackendFactory for ChromiumFactory {
 struct State {
     main_frame: String,
     world: Option<i64>,
+    /// Isolated worlds created for the main frame so far; tells navigation when the new document's world exists.
+    worlds_created: u64,
     helper_in: Option<i64>,
     lifecycle: HashSet<(String, String)>,
     doc_status: HashMap<String, u16>,
@@ -253,6 +255,30 @@ impl ChromiumBackend {
         Ok(())
     }
 
+    /// Waits for the new document's isolated world, then for its load event in the page.
+    /// `Ok(None)` means the fast path could not be used and the caller should fall back.
+    async fn load_in_page(&mut self, worlds_before: u64, deadline: tokio::time::Instant) -> Result<Option<PageState>> {
+        loop {
+            self.lifecycle.borrow_and_update();
+            {
+                let st = self.state.lock().unwrap();
+                if st.worlds_created > worlds_before && st.world.is_some() {
+                    break;
+                }
+            }
+            match tokio::time::timeout_at(deadline, self.lifecycle.changed()).await {
+                Ok(Ok(())) => continue,
+                Ok(Err(_)) => return Err(CoreError::backend("browser connection closed")),
+                Err(_) => return Ok(None),
+            }
+        }
+        match tokio::time::timeout_at(deadline, self.call("loaded", json!([]))).await {
+            Ok(Ok(v)) => Ok(serde_json::from_value(v).ok()),
+            // Context replaced mid-load (redirect, reload) or slow page: use the lifecycle path.
+            Ok(Err(_)) | Err(_) => Ok(None),
+        }
+    }
+
     async fn wait_lifecycle(&mut self, loader: &str, name: &str, timeout: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -360,6 +386,8 @@ async fn pump_events(
                     let id = c["id"].as_i64();
                     st.world = id;
                     st.helper_in = id;
+                    st.worlds_created += 1;
+                    lifecycle.send_modify(|n| *n += 1);
                 }
             }
             "Runtime.executionContextDestroyed" => {
@@ -525,6 +553,7 @@ impl Backend for ChromiumBackend {
 
     async fn navigate(&mut self, url: &str, wait_until: WaitUntil, timeout: Duration) -> Result<NavigationInfo> {
         let started = Instant::now();
+        let worlds_before = self.state.lock().unwrap().worlds_created;
         let r = self.cdp.send("Page.navigate", json!({ "url": url }), Some(&self.session), timeout).await?;
         trace(started, "navigate committed");
         let error = s(&r, "errorText");
@@ -533,6 +562,17 @@ impl Backend for ChromiumBackend {
         }
         let loader = s(&r, "loaderId");
         let same_document = loader.is_empty();
+        // Fast path for `load`: one evaluation in the new document that waits for
+        // the load event inside the page and returns URL and title, instead of
+        // waiting for the event here and then asking the page in a second round trip.
+        if !same_document && wait_until == WaitUntil::Load {
+            let deadline = tokio::time::Instant::from_std(started + timeout);
+            if let Some(page) = self.load_in_page(worlds_before, deadline).await? {
+                trace(started, "loaded (in-page)");
+                let status = self.state.lock().unwrap().doc_status.get(&loader).copied();
+                return Ok(NavigationInfo { url: page.url, title: page.title, status, same_document });
+            }
+        }
         if !same_document {
             let name = match wait_until {
                 WaitUntil::DomContentLoaded => "DOMContentLoaded",

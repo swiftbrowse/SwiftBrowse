@@ -25,7 +25,7 @@ const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
 const SB_BIN = path.resolve(args[0] || path.join(here, '../target/release/swiftbrowse'));
 const ITER = +opt('--iter', 30);
-const COLD = +opt('--cold', 5);
+const COLD = +opt('--cold', 20);
 const WARMUP = 3;
 const OUT = path.resolve(opt('--out', path.join(here, 'results')));
 
@@ -117,14 +117,24 @@ const pwForm = async (page, rec) => {
   }))[0]);
 };
 
+async function coldSwiftBrowse() {
+  const t = now();
+  const sb = await SwiftBrowse.start();
+  await sb.tool('navigate', { url: `${BASE}/form` });
+  record('cold_start', 'swiftbrowse', 'launch_to_loaded_page', now() - t);
+  await sb.stop();
+}
+
+async function coldPlaywright() {
+  const t = now();
+  const browser = await chromium.launch({ executablePath: CHROME, headless: true });
+  const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
+  await page.goto(`${BASE}/form`);
+  record('cold_start', 'playwright', 'launch_to_loaded_page', now() - t);
+  await browser.close();
+}
+
 async function runSwiftBrowse() {
-  for (let i = 0; i < COLD; i++) {
-    const t = now();
-    const sb = await SwiftBrowse.start();
-    await sb.tool('navigate', { url: `${BASE}/form` });
-    record('cold_start', 'swiftbrowse', 'launch_to_loaded_page', now() - t);
-    await sb.stop();
-  }
   const sb = await SwiftBrowse.start();
   for (let i = 0; i < WARMUP + ITER; i++) {
     const keep = i >= WARMUP;
@@ -150,14 +160,6 @@ async function runSwiftBrowse() {
 
 async function runPlaywright() {
   const launchOpts = { executablePath: CHROME, headless: true };
-  for (let i = 0; i < COLD; i++) {
-    const t = now();
-    const browser = await chromium.launch(launchOpts);
-    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
-    await page.goto(`${BASE}/form`);
-    record('cold_start', 'playwright', 'launch_to_loaded_page', now() - t);
-    await browser.close();
-  }
   const browser = await chromium.launch(launchOpts);
   const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
   for (let i = 0; i < WARMUP + ITER; i++) {
@@ -184,6 +186,13 @@ async function runPlaywright() {
 
 // Order can matter (thermal state, page cache); `--order playwright-first` checks for that.
 const ORDER = opt('--order', 'swiftbrowse-first');
+// Cold starts are interleaved run by run so drift (page cache, CPU state) hits both
+// tools equally; one discarded warm-up each loads both binaries from disk.
+const coldPair = ORDER === 'playwright-first' ? [coldPlaywright, coldSwiftBrowse] : [coldSwiftBrowse, coldPlaywright];
+for (let i = 0; i < COLD + 1; i++) {
+  for (const run of coldPair) await run();
+  if (i === 0) delete results.cold_start;
+}
 if (ORDER === 'playwright-first') { await runPlaywright(); await runSwiftBrowse(); } else { await runSwiftBrowse(); await runPlaywright(); }
 server.close();
 

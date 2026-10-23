@@ -69,26 +69,27 @@ The core retries only failures the backend guarantees happened *before* input re
 
 `bench/bench.mjs` runs identical tasks with Playwright 1.64.0 (library API) and SwiftBrowse (through MCP over stdio). Both use the same Chromium binary, local pages and viewport, with warm-ups discarded. Its header lists the fairness rules; keep them when changing it.
 
-Latest run: 4× Xeon 2.1 GHz cloud container, Chrome for Testing 153.0.8010.12, 50 iterations, 10 cold runs, both run orders (SwiftBrowse-first / Playwright-first). p50 in ms:
+Latest run: 4× Xeon 2.1 GHz cloud container, Chrome for Testing 153.0.8010.12, 50 warm iterations, 20 interleaved cold runs, both run orders (SwiftBrowse-first / Playwright-first). p50 in ms:
 
 | task | SwiftBrowse | Playwright | ratio |
 |---|---:|---:|---:|
-| cold start → loaded page | 389 / 463 | 371 / 393 | 1.05 / 1.18 (near parity; noisy, n=10) |
-| navigate | 31.7 / 32.9 | 30.6 / 31.0 | 1.04 / 1.06 (near parity) |
-| fill (email) | 8.6 | 38.1 | 0.23 |
-| click (checkbox label) | 16.7 | 43.1 | 0.39 |
-| submit + wait for result | 287 | 339 | 0.85 |
-| **form task total** | **362 / 364** | **467 / 467** | **0.77 / 0.78** |
-| snapshot, small page | 1.8 | 6.5 | 0.27 |
-| snapshot, 400-row page | 14.6 | 148 | 0.10 |
-| role+name lookup, 400-row page | 3.3 | 18.2 | 0.18 |
+| cold start → loaded page | 424 / 398 | 398 / 361 | 1.06 / 1.10 (near parity) |
+| navigate | 32.1 / 30.3 | 27.3 / 27.9 | 1.18 / 1.09 (engine parity; see below) |
+| fill (email) | 9.6 / 8.6 | 34.1 / 35.2 | 0.28 / 0.25 |
+| click (checkbox label) | 18.0 / 16.4 | 41.7 / 40.1 | 0.43 / 0.41 |
+| submit + wait for result | 286 / 286 | 338 / 338 | 0.85 / 0.85 |
+| **form task total** | **360 / 352** | **454 / 459** | **0.79 / 0.77** |
+| snapshot, small page | 1.6 | 6.7 | 0.23 |
+| snapshot, 400-row page | 13.7 | 127 | 0.11 |
+| role+name lookup, 400-row page | 3.3 | 17.0 | 0.20 |
 
 Snapshot output an agent receives (bytes): small page **288 vs 349**; 400-row page 6,400 vs 125,549.
 
 Read these with care:
-- SwiftBrowse does *more* work in some steps: `fill` reads the value back to verify it, and `navigate` reads the real title. Playwright's `goto` returns neither.
+- SwiftBrowse is measured through MCP (a separate process, JSON over stdio); Playwright through its in-process library. The MCP round trip costs 1–4 ms per call. Server-side, SwiftBrowse's navigate takes 26–28 ms against Playwright's 27, so the navigate row is transport, not engine. Cold start is also within run-to-run spread.
+- SwiftBrowse does *more* work in some steps: `fill` reads the value back to verify it, and `navigate` returns the real title. Playwright's `goto` returns neither.
 - Snapshots differ in format: SwiftBrowse sends line-per-element text with refs and the URL; Playwright's `ariaSnapshot()` is YAML without refs. On the large page SwiftBrowse is bounded to 150 elements, so those two sizes aren't equivalent content.
-- One machine and one fixture set. Cold start and navigate move by ±10% between runs. Full tables: `bench/results/`.
+- One machine and one fixture set. Full tables: `bench/results/`.
 
 Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse --iter 50 --cold 10 [--order playwright-first]`.
 

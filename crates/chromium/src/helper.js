@@ -396,5 +396,11 @@
     selectOption,
     snapshot,
     pageState: () => ({ url: location.href, title: document.title }),
+    // Resolves with the page state once the window load event has fired.
+    loaded: () => new Promise((res) => {
+      const done = () => res({ url: location.href, title: document.title });
+      if (document.readyState === 'complete') done();
+      else addEventListener('load', done, { once: true });
+    }),
   };
 })();

@@ -23,9 +23,14 @@ fn serve() -> String {
                 let req = String::from_utf8_lossy(&buf[..n]);
                 let target = req.split_whitespace().nth(1).unwrap_or("/");
                 let path = target.split('?').next().unwrap_or("/");
+                if path == "/redirect" {
+                    let _ = stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /form?redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return;
+                }
                 let (status, body) = match path {
                     "/form" => ("200 OK", include_str!("fixtures/form.html")),
                     "/tricky" => ("200 OK", include_str!("fixtures/tricky.html")),
+                    "/onload" => ("200 OK", "<title>before</title><script>addEventListener('load', () => document.title = 'after load')</script>"),
                     _ => ("404 Not Found", "not found"),
                 };
                 let resp = format!(
@@ -280,6 +285,15 @@ async fn navigation_errors_and_policy() {
         assert_eq!((page.url.as_str(), page.title.as_str()), (url.as_str(), title));
         assert_eq!(r.data.unwrap()["title"], title);
     }
+
+    // Redirects report the final URL; titles set by load handlers are included.
+    let r = h.ok("navigate", json!({ "url": format!("{}/redirect", h.base) })).await.data.unwrap();
+    assert_eq!(
+        (r["url"].as_str().unwrap(), r["title"].as_str().unwrap()),
+        (format!("{}/form?redirected", h.base).as_str(), "Sign up")
+    );
+    let r = h.ok("navigate", json!({ "url": format!("{}/onload", h.base) })).await.data.unwrap();
+    assert_eq!(r["title"], "after load");
 
     let caps = h.ok("get_capabilities", json!({})).await.data.unwrap();
     assert!(caps["engine_version"].as_str().unwrap().contains("Chrome"));

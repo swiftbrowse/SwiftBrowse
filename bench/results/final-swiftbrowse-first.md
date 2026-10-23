@@ -1,6 +1,6 @@
 # SwiftBrowse vs Playwright
 
-- **date**: 2026-10-23T21:59:12.001Z
+- **date**: 2026-10-23T22:59:19.946Z
 - **cpu**: Intel(R) Xeon(R) Processor @ 2.10GHz x4
 - **memory_gb**: 15.7
 - **os**: Linux 6.18.44-fc-v153
@@ -10,7 +10,7 @@
 - **chromium**: Google Chrome for Testing 153.0.8010.12
 - **iterations**: 50
 - **warmup_discarded**: 3
-- **cold_runs**: 10
+- **cold_runs**: 20
 - **order**: swiftbrowse-first
 - **network**: loopback HTTP server in the benchmark process
 
@@ -20,17 +20,17 @@ Times in ms. Lower is better. Ratio = SwiftBrowse p50 / Playwright p50 (< 1 mean
 
 | task | step | SwiftBrowse p50 | p95 | Playwright p50 | p95 | ratio |
 |---|---|---:|---:|---:|---:|---:|
-| cold_start | launch_to_loaded_page | 389.45 | 462.27 | 370.76 | 398.11 | 1.05 |
-| form_task | navigate | 31.73 | 42.67 | 30.58 | 35.96 | 1.04 |
-| form_task | fill_email | 8.64 | 12.73 | 38.05 | 47.91 | 0.23 |
-| form_task | fill_password | 7.7 | 11.57 | 9.2 | 13.08 | 0.84 |
-| form_task | select | 4.85 | 7.97 | 7.51 | 10.07 | 0.65 |
-| form_task | check | 16.72 | 28.51 | 43.12 | 52.04 | 0.39 |
-| form_task | submit_and_wait | 287.22 | 294.09 | 338.7 | 344.87 | 0.85 |
-| form_task | total | 361.8 | 378.36 | 467.48 | 484.71 | 0.77 |
-| snapshot_form | snapshot | 1.77 | 2.49 | 6.54 | 8.35 | 0.27 |
-| snapshot_large | snapshot | 14.56 | 21.18 | 147.96 | 202.53 | 0.10 |
-| semantic_lookup_large | role_and_name | 3.26 | 4.34 | 18.16 | 22.11 | 0.18 |
+| cold_start | launch_to_loaded_page | 423.56 | 472.37 | 397.95 | 429.36 | 1.06 |
+| form_task | navigate | 32.08 | 40.16 | 27.27 | 33.25 | 1.18 |
+| form_task | fill_email | 9.57 | 12.92 | 34.06 | 40.71 | 0.28 |
+| form_task | fill_password | 7.59 | 11.95 | 9.19 | 13.96 | 0.83 |
+| form_task | select | 4.54 | 7.93 | 6.73 | 9 | 0.67 |
+| form_task | check | 18.04 | 27.04 | 41.71 | 54.13 | 0.43 |
+| form_task | submit_and_wait | 286.04 | 294.03 | 338.04 | 342.17 | 0.85 |
+| form_task | total | 360.28 | 383.18 | 453.86 | 472.17 | 0.79 |
+| snapshot_form | snapshot | 1.56 | 2.23 | 6.73 | 11.09 | 0.23 |
+| snapshot_large | snapshot | 13.69 | 20.76 | 127.33 | 159.97 | 0.11 |
+| semantic_lookup_large | role_and_name | 3.33 | 4.49 | 16.97 | 21.72 | 0.20 |
 
 ## Snapshot output size (bytes an agent receives)
 
