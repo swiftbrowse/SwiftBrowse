@@ -20,7 +20,9 @@ fn pages() -> HashMap<String, MockPage> {
                 MockElement::button("e4", "Menu"),
                 MockElement::new("e5", "p", None, "Row one"),
                 MockElement::textbox("e6", "Email"),
-                MockElement::button("e7", "Continue").test_id("next").on_click(Effect::Navigate { url: "https://app.test/done".into() }),
+                MockElement::button("e7", "Continue")
+                    .test_id("next")
+                    .on_click(Effect::Navigate { url: "https://app.test/done".into() }),
                 MockElement::button("e8", "Place order"),
                 MockElement::button("e9", "Late").appears_after(Duration::from_millis(150)),
                 MockElement::button("e10", "Disabled").disabled(),
@@ -35,11 +37,8 @@ fn pages() -> HashMap<String, MockPage> {
 
 async fn setup() -> (SessionManager, Arc<MockFactory>, String) {
     let factory = Arc::new(MockFactory::new(pages()));
-    let policy = Policy {
-        evidence_dir: tempfile::tempdir().unwrap().keep(),
-        default_timeout_ms: 400,
-        ..Policy::default()
-    };
+    let policy =
+        Policy { evidence_dir: tempfile::tempdir().unwrap().keep(), default_timeout_ms: 400, ..Policy::default() };
     let mut mgr = SessionManager::new(factory.clone(), policy);
     let id = mgr.create(None, &SessionOptions::default()).await.unwrap().session_id;
     let r = run(&mut mgr, &id, "navigate", json!({ "url": "https://app.test/" })).await;
@@ -58,7 +57,13 @@ fn kind(r: &ActionResult) -> ErrorKind {
 #[tokio::test]
 async fn ambiguous_match_is_reported_not_guessed() {
     let (mut mgr, f, id) = setup().await;
-    let r = run(&mut mgr, &id, "click", json!({ "target": { "by": "role", "role": "button", "name": "Delete", "exact": true }, "approved": true })).await;
+    let r = run(
+        &mut mgr,
+        &id,
+        "click",
+        json!({ "target": { "by": "role", "role": "button", "name": "Delete", "exact": true }, "approved": true }),
+    )
+    .await;
     assert_eq!(kind(&r), ErrorKind::Ambiguous);
     assert_eq!(r.error.unwrap().details["total"], 2);
     assert!(f.last.lock().unwrap().as_ref().unwrap().state.lock().unwrap().clicks.is_empty());
@@ -98,7 +103,9 @@ async fn consequential_click_requires_approval() {
     assert!(!r.error.unwrap().recoverable);
     assert!(f.last.lock().unwrap().as_ref().unwrap().state.lock().unwrap().clicks.is_empty(), "must not click");
 
-    let r = run(&mut mgr, &id, "click", json!({ "target": { "by": "auto", "query": "Place order" }, "approved": true })).await;
+    let r =
+        run(&mut mgr, &id, "click", json!({ "target": { "by": "auto", "query": "Place order" }, "approved": true }))
+            .await;
     assert!(r.ok);
 }
 
@@ -110,10 +117,15 @@ async fn click_without_expect_is_not_verified_and_with_expect_is() {
     assert_eq!(r.verification.unwrap().status, VerificationStatus::NotChecked);
 
     run(&mut mgr, &id, "navigate", json!({ "url": "https://app.test/" })).await;
-    let r = run(&mut mgr, &id, "click", json!({
-        "target": { "by": "test_id", "id": "next" },
-        "expect": { "type": "url_contains", "value": "/done" }
-    }))
+    let r = run(
+        &mut mgr,
+        &id,
+        "click",
+        json!({
+            "target": { "by": "test_id", "id": "next" },
+            "expect": { "type": "url_contains", "value": "/done" }
+        }),
+    )
     .await;
     assert!(r.ok, "{r:?}");
     assert_eq!(r.verification.unwrap().status, VerificationStatus::Passed);
@@ -123,11 +135,16 @@ async fn click_without_expect_is_not_verified_and_with_expect_is() {
 #[tokio::test]
 async fn failed_expectation_is_a_verification_failure_not_a_retry() {
     let (mut mgr, f, id) = setup().await;
-    let r = run(&mut mgr, &id, "click", json!({
-        "target": { "by": "auto", "query": "Menu" },
-        "expect": { "type": "url_contains", "value": "/never" },
-        "timeout_ms": 100
-    }))
+    let r = run(
+        &mut mgr,
+        &id,
+        "click",
+        json!({
+            "target": { "by": "auto", "query": "Menu" },
+            "expect": { "type": "url_contains", "value": "/never" },
+            "timeout_ms": 100
+        }),
+    )
     .await;
     assert_eq!(kind(&r), ErrorKind::VerificationFailed);
     assert_eq!(f.last.lock().unwrap().as_ref().unwrap().state.lock().unwrap().clicks.len(), 1, "clicked exactly once");
@@ -140,7 +157,8 @@ async fn waits_for_late_elements_and_times_out_on_disabled_ones() {
     assert!(r.ok, "{r:?}");
     assert!(r.notes.iter().any(|n| n.contains("waited")));
 
-    let r = run(&mut mgr, &id, "click", json!({ "target": { "by": "auto", "query": "Disabled" }, "timeout_ms": 120 })).await;
+    let r = run(&mut mgr, &id, "click", json!({ "target": { "by": "auto", "query": "Disabled" }, "timeout_ms": 120 }))
+        .await;
     assert_eq!(kind(&r), ErrorKind::Timeout);
     assert!(r.error.unwrap().message.contains("disabled"));
 }
@@ -148,7 +166,13 @@ async fn waits_for_late_elements_and_times_out_on_disabled_ones() {
 #[tokio::test]
 async fn stale_refs_are_reported() {
     let (mut mgr, _f, id) = setup().await;
-    let r = run(&mut mgr, &id, "click", json!({ "target": { "by": "role", "role": "button", "name": "Delete", "nth": 0 }, "approved": true })).await;
+    let r = run(
+        &mut mgr,
+        &id,
+        "click",
+        json!({ "target": { "by": "role", "role": "button", "name": "Delete", "nth": 0 }, "approved": true }),
+    )
+    .await;
     assert!(r.ok);
     let r = run(&mut mgr, &id, "find_element", json!({ "target": { "by": "ref", "ref": "e5" } })).await;
     assert_eq!(kind(&r), ErrorKind::StaleElement);
@@ -162,18 +186,25 @@ async fn fill_is_verified_and_assertions_feed_the_report() {
     assert_eq!(r.verification.unwrap().status, VerificationStatus::Passed);
 
     run(&mut mgr, &id, "click", json!({ "target": { "by": "auto", "query": "Reveal" } })).await;
-    let r = run(&mut mgr, &id, "assert_page_state", json!({
-        "name": "saved banner",
-        "conditions": [
-            { "type": "visible", "target": { "by": "role", "role": "alert" } },
-            { "type": "value_equals", "target": { "by": "label", "text": "Email" }, "value": "a@b.c" },
-            { "type": "title_contains", "value": "Home" }
-        ]
-    }))
+    let r = run(
+        &mut mgr,
+        &id,
+        "assert_page_state",
+        json!({
+            "name": "saved banner",
+            "conditions": [
+                { "type": "visible", "target": { "by": "role", "role": "alert" } },
+                { "type": "value_equals", "target": { "by": "label", "text": "Email" }, "value": "a@b.c" },
+                { "type": "title_contains", "value": "Home" }
+            ]
+        }),
+    )
     .await;
     assert!(r.ok, "{r:?}");
 
-    let r = run(&mut mgr, &id, "assert_page_state", json!({ "conditions": [{ "type": "text_visible", "text": "nope" }] })).await;
+    let r =
+        run(&mut mgr, &id, "assert_page_state", json!({ "conditions": [{ "type": "text_visible", "text": "nope" }] }))
+            .await;
     assert_eq!(kind(&r), ErrorKind::VerificationFailed);
 
     let report = run(&mut mgr, &id, "get_test_report", json!({})).await.data.unwrap();

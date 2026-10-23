@@ -9,7 +9,7 @@
 //   addition (e.g. fill read-back verification) is not removed for the benchmark.
 // - Wins come from engine changes, never from changing a task to suit one tool.
 //
-// Usage: node bench.mjs <path-to-swiftbrowse-binary> [--iter 30] [--cold 5] [--out results]
+// Usage: node bench.mjs <path-to-swiftbrowse-binary> [--iter 30] [--cold 5] [--order swiftbrowse-first|playwright-first] [--out results]
 
 import { chromium } from 'playwright-core';
 import { spawn, execFileSync } from 'node:child_process';
@@ -181,8 +181,9 @@ async function runPlaywright() {
   await browser.close();
 }
 
-await runSwiftBrowse();
-await runPlaywright();
+// Order can matter (thermal state, page cache); `--order playwright-first` checks for that.
+const ORDER = opt('--order', 'swiftbrowse-first');
+if (ORDER === 'playwright-first') { await runPlaywright(); await runSwiftBrowse(); } else { await runSwiftBrowse(); await runPlaywright(); }
 server.close();
 
 // ---------- report ----------
@@ -197,7 +198,7 @@ const env = {
   playwright: '1.64.0 (playwright-core, library API)',
   swiftbrowse: `${sbVersion} (MCP over stdio)`,
   chromium: chromeVersion,
-  iterations: ITER, warmup_discarded: WARMUP, cold_runs: COLD,
+  iterations: ITER, warmup_discarded: WARMUP, cold_runs: COLD, order: ORDER,
   network: 'loopback HTTP server in the benchmark process',
 };
 const summary = {};

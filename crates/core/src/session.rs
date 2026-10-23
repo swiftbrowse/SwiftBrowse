@@ -184,7 +184,13 @@ impl Session {
         }
 
         let duration_ms = t0.elapsed().as_millis() as u64;
-        self.log.push_back(LogEntry { action_id: action_id.clone(), op: op.into(), ok, error: error.clone(), duration_ms });
+        self.log.push_back(LogEntry {
+            action_id: action_id.clone(),
+            op: op.into(),
+            ok,
+            error: error.clone(),
+            duration_ms,
+        });
         while self.log.len() > self.policy.max_log_entries {
             self.log.pop_front();
         }
@@ -281,7 +287,8 @@ impl Session {
                 let ref_id = self.act(&a.target, Act::Fill(&a.value), &mut poll, ctx).await?;
                 let actual = self.backend.read_value(&ref_id).await?;
                 let passed = actual.as_deref() == Some(a.value.as_str());
-                let sensitive = ctx.target.as_ref().is_some_and(|t| t.element.input_type.as_deref() == Some("password"));
+                let sensitive =
+                    ctx.target.as_ref().is_some_and(|t| t.element.input_type.as_deref() == Some("password"));
                 let observed = if sensitive { json!("<redacted>") } else { json!(actual) };
                 ctx.verification = Some(Verification {
                     status: if passed { VerificationStatus::Passed } else { VerificationStatus::Failed },
@@ -412,7 +419,8 @@ impl Session {
                         Some(false) => None,
                         None => self.policy.consequential_reason(&resolved.element),
                     };
-                    if let Some(reason) = reason.filter(|_| self.policy.require_approval_for_consequential && !approved) {
+                    if let Some(reason) = reason.filter(|_| self.policy.require_approval_for_consequential && !approved)
+                    {
                         return Err(CoreError::new(
                             ErrorKind::ApprovalRequired,
                             "this click looks consequential; ask a human and repeat with approved=true",
@@ -461,7 +469,13 @@ impl Session {
         })
     }
 
-    async fn verify_expect(&mut self, expect: Option<&Condition>, poll: &mut Poll, ctx: &mut Ctx, what: &str) -> Result<()> {
+    async fn verify_expect(
+        &mut self,
+        expect: Option<&Condition>,
+        poll: &mut Poll,
+        ctx: &mut Ctx,
+        what: &str,
+    ) -> Result<()> {
         let Some(cond) = expect else {
             ctx.verification = Some(not_checked(&format!(
                 "{what} was dispatched; no expected outcome was given, so success is not verified"
@@ -656,7 +670,8 @@ fn select(matches: Vec<ElementInfo>, strategy: String, nth: Option<usize>) -> Re
         return Err(CoreError::new(ErrorKind::NotFound, format!("no element matched ({strategy})")));
     }
     let any_visible = matches.iter().any(|e| e.visible);
-    let pool: Vec<ElementInfo> = if any_visible { matches.into_iter().filter(|e| e.visible).collect() } else { matches };
+    let pool: Vec<ElementInfo> =
+        if any_visible { matches.into_iter().filter(|e| e.visible).collect() } else { matches };
     let element = match nth {
         Some(n) => pool.get(n).cloned().ok_or_else(|| {
             CoreError::new(ErrorKind::NotFound, format!("nth={n} requested but only {} matched", pool.len()))

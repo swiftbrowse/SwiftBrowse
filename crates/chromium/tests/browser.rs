@@ -21,7 +21,8 @@ fn serve() -> String {
                 let mut buf = [0u8; 4096];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
-                let path = req.split_whitespace().nth(1).unwrap_or("/");
+                let target = req.split_whitespace().nth(1).unwrap_or("/");
+                let path = target.split('?').next().unwrap_or("/");
                 let (status, body) = match path {
                     "/form" => ("200 OK", include_str!("fixtures/form.html")),
                     "/tricky" => ("200 OK", include_str!("fixtures/tricky.html")),
@@ -98,26 +99,38 @@ async fn form_flow_is_verified_end_to_end() {
     let pw_json = serde_json::to_string(&pw).unwrap();
     assert!(!pw_json.contains("s3cret"), "password leaked: {pw_json}");
     h.ok("fill", json!({ "target": { "by": "auto", "query": "Birthday" }, "value": "1990-12-10" })).await;
-    h.ok("fill", json!({ "target": { "by": "role", "role": "textbox", "name": "Bio" }, "value": "Hello\nworld" })).await;
-    let sel = h.ok("select_option", json!({ "target": { "by": "label", "text": "Country" }, "option": "Netherlands" })).await;
+    h.ok("fill", json!({ "target": { "by": "role", "role": "textbox", "name": "Bio" }, "value": "Hello\nworld" }))
+        .await;
+    let sel =
+        h.ok("select_option", json!({ "target": { "by": "label", "text": "Country" }, "option": "Netherlands" })).await;
     assert_eq!(sel.data.unwrap()["selected"][0], "nl");
 
     // Submitting without accepting the terms shows a validation alert, not success.
     let r = h
-        .run("click", json!({ "target": { "by": "role", "role": "button", "name": "Sign up" },
-            "expect": { "type": "text_visible", "text": "Welcome" }, "timeout_ms": 600 }))
+        .run(
+            "click",
+            json!({ "target": { "by": "role", "role": "button", "name": "Sign up" },
+            "expect": { "type": "text_visible", "text": "Welcome" }, "timeout_ms": 600 }),
+        )
         .await;
     assert_eq!(kind(&r), ErrorKind::VerificationFailed);
     assert!(!r.evidence.is_empty(), "failure should capture a screenshot");
     assert!(std::path::Path::new(&r.evidence[0].path).exists());
     let snap = h.ok("get_page_snapshot", json!({})).await.data.unwrap();
-    assert!(snap["messages"].as_array().unwrap().iter().any(|m| m["text"].as_str().unwrap().contains("accept the terms")));
+    assert!(snap["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["text"].as_str().unwrap().contains("accept the terms")));
 
     h.ok("click", json!({ "target": { "by": "label", "text": "I agree" } })).await;
     h.ok("assert_page_state", json!({ "conditions": [{ "type": "checked", "target": { "by": "role", "role": "checkbox" }, "checked": true }] })).await;
     let r = h
-        .ok("click", json!({ "target": { "by": "auto", "query": "Sign up" },
-            "expect": { "type": "text_visible", "text": "Welcome, ada@example.com from nl" } }))
+        .ok(
+            "click",
+            json!({ "target": { "by": "auto", "query": "Sign up" },
+            "expect": { "type": "text_visible", "text": "Welcome, ada@example.com from nl" } }),
+        )
         .await;
     assert_eq!(r.verification.unwrap().status, VerificationStatus::Passed);
     h.ok("assert_page_state", json!({ "conditions": [{ "type": "url_contains", "value": "/welcome" }] })).await;
@@ -135,38 +148,56 @@ async fn ambiguity_actionability_and_waiting() {
     // Overlay covers the page for 400 ms: the click waits instead of clicking the overlay.
     h.ok("click", json!({ "target": { "by": "auto", "query": "Show overlay" } })).await;
     let r = h
-        .ok("click", json!({ "target": { "by": "auto", "query": "Under overlay" },
-            "expect": { "type": "title_contains", "value": "covered clicked" } }))
+        .ok(
+            "click",
+            json!({ "target": { "by": "auto", "query": "Under overlay" },
+            "expect": { "type": "title_contains", "value": "covered clicked" } }),
+        )
         .await;
     assert!(r.notes.iter().any(|n| n.contains("covered by")), "{:?}", r.notes);
 
     // Element that does not exist yet.
-    h.ok("click", json!({ "target": { "by": "text", "text": "Late button", "exact": true },
-        "expect": { "type": "text_visible", "text": "Late clicked" } }))
-        .await;
+    h.ok(
+        "click",
+        json!({ "target": { "by": "text", "text": "Late button", "exact": true },
+        "expect": { "type": "text_visible", "text": "Late clicked" } }),
+    )
+    .await;
 
     // Hidden duplicate is ignored; the visible Menu opens the menu.
-    h.ok("click", json!({ "target": { "by": "role", "role": "button", "name": "Menu" },
-        "expect": { "type": "visible", "target": { "by": "role", "role": "link", "name": "Account settings" } } }))
-        .await;
+    h.ok(
+        "click",
+        json!({ "target": { "by": "role", "role": "button", "name": "Menu" },
+        "expect": { "type": "visible", "target": { "by": "role", "role": "link", "name": "Account settings" } } }),
+    )
+    .await;
 
     // Open shadow DOM.
-    h.ok("click", json!({ "target": { "by": "role", "role": "button", "name": "Shadow action" },
-        "expect": { "type": "text_visible", "text": "Shadow done" } }))
-        .await;
+    h.ok(
+        "click",
+        json!({ "target": { "by": "role", "role": "button", "name": "Shadow action" },
+        "expect": { "type": "text_visible", "text": "Shadow done" } }),
+    )
+    .await;
 
     // A button still sliding into place is not clicked mid-animation.
     h.ok("click", json!({ "target": { "by": "auto", "query": "Start slide" } })).await;
     let r = h
-        .ok("click", json!({ "target": { "by": "role", "role": "button", "name": "Slider" },
-            "expect": { "type": "text_visible", "text": "Slid" } }))
+        .ok(
+            "click",
+            json!({ "target": { "by": "role", "role": "button", "name": "Slider" },
+            "expect": { "type": "text_visible", "text": "Slid" } }),
+        )
         .await;
     assert!(r.notes.iter().any(|n| n.contains("still moving")), "{:?}", r.notes);
 
     // Delete row 2 and confirm the count changed.
-    h.ok("click", json!({ "target": { "by": "role", "role": "button", "name": "Delete", "nth": 1 }, "approved": true,
-        "expect": { "type": "count", "target": { "by": "role", "role": "button", "name": "Delete" }, "count": 1 } }))
-        .await;
+    h.ok(
+        "click",
+        json!({ "target": { "by": "role", "role": "button", "name": "Delete", "nth": 1 }, "approved": true,
+        "expect": { "type": "count", "target": { "by": "role", "role": "button", "name": "Delete" }, "count": 1 } }),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -177,14 +208,20 @@ async fn approval_dialogs_stale_refs_and_diagnostics() {
     let r = h.run("click", json!({ "target": { "by": "test_id", "id": "checkout" } })).await;
     assert_eq!(kind(&r), ErrorKind::ApprovalRequired);
     h.ok("assert_page_state", json!({ "conditions": [{ "type": "text_absent", "text": "Order placed" }] })).await;
-    h.ok("click", json!({ "target": { "by": "test_id", "id": "checkout" }, "approved": true,
-        "expect": { "type": "text_visible", "text": "Order placed" } }))
-        .await;
+    h.ok(
+        "click",
+        json!({ "target": { "by": "test_id", "id": "checkout" }, "approved": true,
+        "expect": { "type": "text_visible", "text": "Order placed" } }),
+    )
+    .await;
 
     // confirm() is dismissed, never accepted on the user's behalf.
-    h.ok("click", json!({ "target": { "by": "auto", "query": "Ask" },
-        "expect": { "type": "text_visible", "text": "no" } }))
-        .await;
+    h.ok(
+        "click",
+        json!({ "target": { "by": "auto", "query": "Ask" },
+        "expect": { "type": "text_visible", "text": "no" } }),
+    )
+    .await;
     let snap = h.ok("get_page_snapshot", json!({})).await.data.unwrap();
     assert!(snap["messages"].as_array().unwrap().iter().any(|m| m["kind"] == "js_dialog"));
 
@@ -197,7 +234,14 @@ async fn approval_dialogs_stale_refs_and_diagnostics() {
     let console = h.ok("get_console_errors", json!({})).await.data.unwrap();
     assert!(console["errors"].as_array().unwrap().iter().any(|e| e["text"] == "boom from page"), "{console}");
     let net = h.ok("get_network_failures", json!({})).await.data.unwrap();
-    assert!(net["failures"].as_array().unwrap().iter().any(|f| f["status"] == 404 && f["url"].as_str().unwrap().ends_with("/missing.json")), "{net}");
+    assert!(
+        net["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["status"] == 404 && f["url"].as_str().unwrap().ends_with("/missing.json")),
+        "{net}"
+    );
 
     // The page set window.__sb; the helper lives in an isolated world and is unaffected.
     h.ok("find_element", json!({ "target": { "by": "css", "selector": "h1" } })).await;
@@ -226,6 +270,16 @@ async fn navigation_errors_and_policy() {
 
     let r = h.run("navigate", json!({ "url": "file:///etc/hostname" })).await;
     assert_eq!(kind(&r), ErrorKind::PermissionDenied);
+
+    // Reported URL and title must be the new document's, never a stale or placeholder value.
+    for i in 0..10 {
+        let (path, title) = if i % 2 == 0 { ("/form", "Sign up") } else { ("/tricky", "Tricky") };
+        let url = format!("{}{path}?{i}", h.base);
+        let r = h.ok("navigate", json!({ "url": url })).await;
+        let page = r.page.unwrap();
+        assert_eq!((page.url.as_str(), page.title.as_str()), (url.as_str(), title));
+        assert_eq!(r.data.unwrap()["title"], title);
+    }
 
     let caps = h.ok("get_capabilities", json!({})).await.data.unwrap();
     assert!(caps["engine_version"].as_str().unwrap().contains("Chrome"));

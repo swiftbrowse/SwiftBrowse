@@ -26,17 +26,25 @@ pub enum Locator {
         exact: bool,
     },
     /// `data-testid`, `data-test-id` or `data-test` attribute.
-    TestId { id: String },
+    TestId {
+        id: String,
+    },
     /// Innermost elements whose text matches.
     Text {
         text: String,
         #[serde(default)]
         exact: bool,
     },
-    Css { selector: String },
-    Xpath { expr: String },
+    Css {
+        selector: String,
+    },
+    Xpath {
+        expr: String,
+    },
     /// Try accessible name, then label, then test id, then exact text, then partial text.
-    Auto { query: String },
+    Auto {
+        query: String,
+    },
 }
 
 impl Locator {

@@ -45,9 +45,7 @@ pub fn discover() -> Option<PathBuf> {
     }
     let names = ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome"];
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
-        .find(|p| p.is_file())
+    std::env::split_paths(&path).flat_map(|dir| names.iter().map(move |n| dir.join(n))).find(|p| p.is_file())
 }
 
 fn newest_playwright_chromium(root: &Path) -> Option<PathBuf> {
@@ -117,6 +115,9 @@ pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[Strin
             "--no-service-autorun",
             "--disable-field-trial-config",
             "--disable-background-networking",
+            // Back/forward cache freezes the old page on every navigation; automation
+            // wants a fresh document and pays for the freeze otherwise.
+            "--disable-back-forward-cache",
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
@@ -147,9 +148,7 @@ pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[Strin
     cmd.args(extra);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| CoreError::backend(format!("cannot start {}: {e}", exe.display())))?;
+    let mut child = cmd.spawn().map_err(|e| CoreError::backend(format!("cannot start {}: {e}", exe.display())))?;
     let stderr = child.stderr.take().expect("piped stderr");
     let mut lines = BufReader::new(stderr).lines();
     let mut tail: Vec<String> = Vec::new();

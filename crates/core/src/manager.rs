@@ -72,6 +72,22 @@ impl SessionManager {
         Ok(info)
     }
 
+    pub fn factory(&self) -> Arc<dyn BackendFactory> {
+        self.factory.clone()
+    }
+
+    /// Register a backend that was launched ahead of time (e.g. prewarmed while
+    /// an MCP client was still connecting).
+    pub fn adopt(&mut self, id: &str, backend: Box<dyn crate::Backend>) -> Result<SessionInfo> {
+        if self.sessions.contains_key(id) {
+            return Err(CoreError::invalid(format!("session {id} already exists")));
+        }
+        let session = Session::new(id.to_string(), backend, self.policy.clone());
+        let info = info_of(&session);
+        self.sessions.insert(id.to_string(), session);
+        Ok(info)
+    }
+
     pub fn contains(&self, id: &str) -> bool {
         self.sessions.contains_key(id)
     }

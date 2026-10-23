@@ -74,8 +74,11 @@ impl Policy {
                 return Err(CoreError::new(ErrorKind::PermissionDenied, format!("host {host} is blocked by policy")));
             }
             if !self.allowed_hosts.is_empty() && !self.allowed_hosts.iter().any(|p| host_matches(&host, p)) {
-                return Err(CoreError::new(ErrorKind::PermissionDenied, format!("host {host} is not in the allow list"))
-                    .with_details(serde_json::json!({ "allowed_hosts": self.allowed_hosts })));
+                return Err(CoreError::new(
+                    ErrorKind::PermissionDenied,
+                    format!("host {host} is not in the allow list"),
+                )
+                .with_details(serde_json::json!({ "allowed_hosts": self.allowed_hosts })));
             }
         }
         Ok(url)

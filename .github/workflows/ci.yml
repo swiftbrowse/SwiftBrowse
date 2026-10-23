@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      bench:
+        description: Run the Playwright benchmark
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Pinned Chromium build, same as the benchmark's Playwright version.
+      - run: npx -y playwright@1.64.0 install --with-deps chromium
+      - run: cargo run -q -p swiftbrowse-cli -- doctor
+      - run: cargo test --workspace
+
+  test-other:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Core, MCP and CLI build and unit tests; browser integration runs on Linux.
+      - run: cargo test --workspace --exclude swiftbrowse-chromium
+      - run: cargo build -p swiftbrowse-chromium
+
+  bench:
+    if: github.event_name == 'workflow_dispatch' && inputs.bench
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npx -y playwright@1.64.0 install --with-deps chromium
+      - run: cargo build --release
+      - run: npm ci || npm install
+        working-directory: bench
+      - run: node bench.mjs ../target/release/swiftbrowse --iter 50 --cold 10
+        working-directory: bench
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench/results/

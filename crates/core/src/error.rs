@@ -29,10 +29,7 @@ pub enum ErrorKind {
 impl ErrorKind {
     /// Whether a later attempt can reasonably succeed without changing the request.
     pub fn recoverable(self) -> bool {
-        matches!(
-            self,
-            ErrorKind::NotFound | ErrorKind::NotActionable | ErrorKind::StaleElement | ErrorKind::Timeout
-        )
+        matches!(self, ErrorKind::NotFound | ErrorKind::NotActionable | ErrorKind::StaleElement | ErrorKind::Timeout)
     }
 }
 

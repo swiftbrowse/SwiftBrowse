@@ -92,7 +92,10 @@ impl Cdp {
             Ok(Err(_)) => Err(CoreError::backend("browser connection closed")),
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id);
-                Err(CoreError::new(ErrorKind::Timeout, format!("{method} did not respond within {} ms", timeout.as_millis())))
+                Err(CoreError::new(
+                    ErrorKind::Timeout,
+                    format!("{method} did not respond within {} ms", timeout.as_millis()),
+                ))
             }
         }
     }

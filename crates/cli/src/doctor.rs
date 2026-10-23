@@ -52,17 +52,28 @@ pub fn run(as_json: bool) -> ExitCode {
             ready = version.is_some();
             checks.push(match version {
                 Some(v) => check("chromium", "ok", format!("{v} at {}", path.display())),
-                None => check("chromium", "error", format!("{} exists but `--version` failed (missing shared libraries?)", path.display())),
+                None => check(
+                    "chromium",
+                    "error",
+                    format!("{} exists but `--version` failed (missing shared libraries?)", path.display()),
+                ),
             });
         }
         None => checks.push(check(
             "chromium",
             "missing",
-            format!("no Chromium found; install one (e.g. `npx playwright install chromium`) or set {}", launch::ENV_EXECUTABLE),
+            format!(
+                "no Chromium found; install one (e.g. `npx playwright install chromium`) or set {}",
+                launch::ENV_EXECUTABLE
+            ),
         )),
     }
     if launch::needs_no_sandbox() {
-        checks.push(check("sandbox", "warn", "running as root: Chromium will start with --no-sandbox; rely on the container boundary"));
+        checks.push(check(
+            "sandbox",
+            "warn",
+            "running as root: Chromium will start with --no-sandbox; rely on the container boundary",
+        ));
     } else {
         checks.push(check("sandbox", "ok", "Chromium sandbox enabled"));
     }

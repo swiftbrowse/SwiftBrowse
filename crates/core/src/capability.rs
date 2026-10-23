@@ -32,11 +32,7 @@ pub struct CapabilityReport {
 
 impl CapabilityReport {
     pub fn support(&self, name: &str) -> Support {
-        self.capabilities
-            .iter()
-            .find(|c| c.name == name)
-            .map(|c| c.support)
-            .unwrap_or(Support::Unsupported)
+        self.capabilities.iter().find(|c| c.name == name).map(|c| c.support).unwrap_or(Support::Unsupported)
     }
 }
 

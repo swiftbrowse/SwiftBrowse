@@ -29,22 +29,49 @@ pub enum SnapshotMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Condition {
-    UrlEquals { value: String },
-    UrlContains { value: String },
+    UrlEquals {
+        value: String,
+    },
+    UrlContains {
+        value: String,
+    },
     /// Regular expression matched against the full URL.
-    UrlMatches { pattern: String },
-    TitleContains { value: String },
+    UrlMatches {
+        pattern: String,
+    },
+    TitleContains {
+        value: String,
+    },
     /// At least one visible match (or the `nth` match is visible).
-    Visible { target: Target },
+    Visible {
+        target: Target,
+    },
     /// No visible match.
-    Hidden { target: Target },
+    Hidden {
+        target: Target,
+    },
     /// Exact number of matches, visible or not.
-    Count { target: Target, count: usize },
-    TextVisible { text: String },
-    TextAbsent { text: String },
-    ValueEquals { target: Target, value: String },
-    Enabled { target: Target },
-    Checked { target: Target, checked: bool },
+    Count {
+        target: Target,
+        count: usize,
+    },
+    TextVisible {
+        text: String,
+    },
+    TextAbsent {
+        text: String,
+    },
+    ValueEquals {
+        target: Target,
+        value: String,
+    },
+    Enabled {
+        target: Target,
+    },
+    Checked {
+        target: Target,
+        checked: bool,
+    },
     NoConsoleErrors {},
     NoNetworkFailures {},
 }

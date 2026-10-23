@@ -53,7 +53,13 @@ enum Command {
         common: Common,
     },
     /// Serve the Model Context Protocol over stdio.
-    Mcp(#[command(flatten)] Common),
+    Mcp {
+        /// Do not launch the default session's browser until the first tool call.
+        #[arg(long)]
+        no_prewarm: bool,
+        #[command(flatten)]
+        common: Common,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -135,8 +141,11 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Doctor { json } => doctor::run(json),
-        Command::Mcp(common) => {
-            let server = swiftbrowse_mcp::McpServer::new(common.manager(), common.options());
+        Command::Mcp { no_prewarm, common } => {
+            let mut server = swiftbrowse_mcp::McpServer::new(common.manager(), common.options());
+            if !no_prewarm {
+                server.prewarm();
+            }
             match swiftbrowse_mcp::serve_stdio(server).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
@@ -151,7 +160,8 @@ async fn main() -> ExitCode {
         }
         Command::Snapshot { url, full, common } => {
             let mode = if full { "full" } else { "compact" };
-            one_shot(&common, vec![("navigate", json!({ "url": url })), ("get_page_snapshot", json!({ "mode": mode }))]).await
+            one_shot(&common, vec![("navigate", json!({ "url": url })), ("get_page_snapshot", json!({ "mode": mode }))])
+                .await
         }
         Command::Screenshot { url, name, full_page, common } => {
             let steps = vec![

@@ -43,7 +43,9 @@ pub fn parse(chord: &str) -> Result<KeyStroke> {
 }
 
 fn describe(key: &str) -> Result<(String, String, i64, Option<String>)> {
-    let named = |k: &str, code: &str, vk: i64, text: Option<&str>| Ok((k.to_string(), code.to_string(), vk, text.map(str::to_string)));
+    let named = |k: &str, code: &str, vk: i64, text: Option<&str>| {
+        Ok((k.to_string(), code.to_string(), vk, text.map(str::to_string)))
+    };
     match key {
         "Enter" => named("Enter", "Enter", 13, Some("\r")),
         "Tab" => named("Tab", "Tab", 9, None),

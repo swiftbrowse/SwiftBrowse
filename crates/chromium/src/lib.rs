@@ -50,7 +50,15 @@ impl BackendFactory for ChromiumFactory {
                 format!("no Chromium found; set {} or run `swiftbrowse doctor`", launch::ENV_EXECUTABLE),
             )
         })?;
-        Ok(Box::new(ChromiumBackend::start(&exe, options, self.no_sandbox.unwrap_or_else(launch::needs_no_sandbox), &self.extra_args).await?))
+        Ok(Box::new(
+            ChromiumBackend::start(
+                &exe,
+                options,
+                self.no_sandbox.unwrap_or_else(launch::needs_no_sandbox),
+                &self.extra_args,
+            )
+            .await?,
+        ))
     }
 }
 
@@ -113,7 +121,10 @@ impl ChromiumBackend {
             .and_then(|t| t.iter().find(|t| s(t, "type") == "page").map(|t| s(t, "targetId")));
         let target_id = match existing {
             Some(id) => id,
-            None => s(&cdp.send("Target.createTarget", json!({ "url": "about:blank" }), None, CMD_TIMEOUT).await?, "targetId"),
+            None => s(
+                &cdp.send("Target.createTarget", json!({ "url": "about:blank" }), None, CMD_TIMEOUT).await?,
+                "targetId",
+            ),
         };
         let attached = cdp
             .send("Target.attachToTarget", json!({ "targetId": target_id, "flatten": true }), None, CMD_TIMEOUT)
@@ -142,7 +153,13 @@ impl ChromiumBackend {
                 json!({ "width": options.viewport.0, "height": options.viewport.1, "deviceScaleFactor": 1, "mobile": false }),
             ),
         ];
-        let replies = futures_util::future::join_all(setup.into_iter().map(|(m, p)| cdp.send(m, p, sid, CMD_TIMEOUT))).await;
+        let cdp_ref = &cdp;
+        let replies = futures_util::future::join_all(setup.into_iter().map(|(m, p)| async move {
+            let r = cdp_ref.send(m, p, sid, CMD_TIMEOUT).await;
+            trace(m);
+            r
+        }))
+        .await;
         let mut replies = replies.into_iter().collect::<Result<Vec<_>>>()?.into_iter();
         let tree = replies.next().unwrap_or_default();
         state.lock().unwrap().main_frame = s(&tree["frameTree"]["frame"], "id");
@@ -175,7 +192,10 @@ impl ChromiumBackend {
             return Ok(id);
         }
         let r = self
-            .send("Page.createIsolatedWorld", json!({ "frameId": frame, "worldName": WORLD, "grantUniveralAccess": false }))
+            .send(
+                "Page.createIsolatedWorld",
+                json!({ "frameId": frame, "worldName": WORLD, "grantUniveralAccess": false }),
+            )
             .await?;
         let id = r["executionContextId"].as_i64().ok_or_else(|| CoreError::backend("no isolated world id"))?;
         self.state.lock().unwrap().world = Some(id);
@@ -294,11 +314,8 @@ fn context_gone(e: &CoreError) -> bool {
 }
 
 fn js_error(ex: &Value) -> CoreError {
-    let desc = ex["exception"]
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| s(ex, "text"));
+    let desc =
+        ex["exception"].get("description").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| s(ex, "text"));
     if let Some(idx) = desc.find("SB:") {
         let rest = desc[idx + 3..].lines().next().unwrap_or_default();
         let (kind, msg) = rest.split_once(':').unwrap_or(("backend", rest));
@@ -373,15 +390,25 @@ async fn pump_events(
             }
             "Runtime.exceptionThrown" => {
                 let d = &p["exceptionDetails"];
-                let text = d["exception"].get("description").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| s(d, "text"));
+                let text = d["exception"]
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| s(d, "text"));
                 let url = d.get("url").and_then(Value::as_str).map(str::to_string);
-                push_bounded(&mut st.console, ConsoleEntry { level: "exception".into(), text, url, timestamp_ms: now_ms() });
+                push_bounded(
+                    &mut st.console,
+                    ConsoleEntry { level: "exception".into(), text, url, timestamp_ms: now_ms() },
+                );
             }
             "Log.entryAdded" => {
                 let e = &p["entry"];
                 if s(e, "level") == "error" && s(e, "source") != "network" {
                     let url = e.get("url").and_then(Value::as_str).map(str::to_string);
-                    push_bounded(&mut st.console, ConsoleEntry { level: "error".into(), text: s(e, "text"), url, timestamp_ms: now_ms() });
+                    push_bounded(
+                        &mut st.console,
+                        ConsoleEntry { level: "error".into(), text: s(e, "text"), url, timestamp_ms: now_ms() },
+                    );
                 }
             }
             "Network.requestWillBeSent" => {
@@ -396,7 +423,8 @@ async fn pump_events(
                     st.doc_status.insert(s(p, "loaderId"), status);
                 }
                 if status >= 400 {
-                    let method = st.requests.get(&s(p, "requestId")).map(|r| r.1.clone()).unwrap_or_else(|| "GET".into());
+                    let method =
+                        st.requests.get(&s(p, "requestId")).map(|r| r.1.clone()).unwrap_or_else(|| "GET".into());
                     push_bounded(
                         &mut st.network,
                         NetworkFailure {
@@ -462,7 +490,10 @@ impl Backend for ChromiumBackend {
     fn capabilities(&self) -> CapabilityReport {
         let mut warnings = Vec::new();
         if self.no_sandbox {
-            warnings.push("Chromium sandbox disabled (running as root or SWIFTBROWSE_NO_SANDBOX=1); use a container boundary".into());
+            warnings.push(
+                "Chromium sandbox disabled (running as root or SWIFTBROWSE_NO_SANDBOX=1); use a container boundary"
+                    .into(),
+            );
         }
         CapabilityReport {
             backend: "chromium".into(),
@@ -512,6 +543,8 @@ impl Backend for ChromiumBackend {
             trace(started, name);
         }
         let status = self.state.lock().unwrap().doc_status.get(&loader).copied();
+        // Read from the page: Chromium's pushed target title still holds the URL
+        // placeholder when `load` fires, so it cannot be trusted here.
         let page = self.page_state().await?;
         trace(started, "page state read");
         Ok(NavigationInfo { url: page.url, title: page.title, status, same_document })
@@ -562,8 +595,16 @@ impl Backend for ChromiumBackend {
         let (x, y) = (pt["x"].as_f64().unwrap_or(0.0), pt["y"].as_f64().unwrap_or(0.0));
         let dispatch = async {
             self.send("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y })).await?;
-            self.send("Input.dispatchMouseEvent", json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1 })).await?;
-            self.send("Input.dispatchMouseEvent", json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1 })).await
+            self.send(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1 }),
+            )
+            .await?;
+            self.send(
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1 }),
+            )
+            .await
         };
         // Input may have reached the page: never report a retryable kind from here.
         dispatch.await.map(|_| ()).map_err(|e| CoreError::backend(format!("click dispatch failed: {}", e.message)))
@@ -659,7 +700,9 @@ impl Backend for ChromiumBackend {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(s(&r, "data"))
             .map_err(|e| CoreError::backend(format!("bad screenshot data: {e}")))?;
-        tokio::fs::write(path, bytes).await.map_err(|e| CoreError::backend(format!("cannot write {}: {e}", path.display())))
+        tokio::fs::write(path, bytes)
+            .await
+            .map_err(|e| CoreError::backend(format!("cannot write {}: {e}", path.display())))
     }
 
     async fn console_errors(&mut self) -> Result<Vec<ConsoleEntry>> {

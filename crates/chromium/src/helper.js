@@ -252,11 +252,16 @@
     const el = get(r);
     checkActionable(el);
     el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-    const a = el.getBoundingClientRect();
-    // Stability: only pay for a frame when an animation could be moving the target.
-    if (document.getAnimations().some((x) => x.playState === 'running')) {
-      await new Promise((res) => requestAnimationFrame(res));
+    // Stability: only pay for a frame when an animation could be moving the
+    // target. A just-started animation is "pending" and reports its start
+    // position on every frame until it begins, so wait for it to start first.
+    const anims = document.getAnimations().filter((x) => x.playState === 'running' || x.pending);
+    if (anims.length) {
+      const started = Promise.all(anims.filter((x) => x.pending).map((x) => x.ready.catch(() => {})));
+      await Promise.race([started, new Promise((res) => setTimeout(res, 100))]);
     }
+    const a = el.getBoundingClientRect();
+    if (anims.length) await new Promise((res) => requestAnimationFrame(res));
     const b = el.getBoundingClientRect();
     if (Math.abs(a.x - b.x) > 1 || Math.abs(a.y - b.y) > 1 || Math.abs(a.width - b.width) > 1) {
       fail('not_actionable', r + ' is still moving');
