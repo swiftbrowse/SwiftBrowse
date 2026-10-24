@@ -33,7 +33,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Pinned Chromium build, same as the benchmark's Playwright version.
-      - run: npx -y playwright@1.64.0 install --with-deps chromium chromium-headless-shell
+      - run: npx -y playwright@1.64.0 install --with-deps chromium chromium-headless-shell ffmpeg
       - run: cargo run -q -p swiftbrowse-cli -- doctor
       - run: cargo test --workspace
 
@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: npx -y playwright@1.64.0 install chromium chromium-headless-shell
+      - run: npx -y playwright@1.64.0 install chromium chromium-headless-shell ffmpeg
       - run: cargo run -q -p swiftbrowse-cli -- doctor
       - run: cargo test --workspace
 

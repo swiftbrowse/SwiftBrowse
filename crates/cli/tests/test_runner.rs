@@ -116,6 +116,10 @@ fn failures_retries_and_reports() {
             junit.to_str().unwrap(),
             "--html",
             html.to_str().unwrap(),
+            "--trace",
+            "retain-on-failure",
+            "--video",
+            "retain-on-failure",
         ],
         dir.path(),
     );
@@ -134,6 +138,13 @@ fn failures_retries_and_reports() {
     assert!(last["error"].as_str().unwrap().contains("no element matched"), "{last}");
     assert!(Path::new(last["screenshot"].as_str().unwrap()).exists(), "failure screenshot kept");
     assert!(last["page"].as_str().unwrap().contains("Hello"), "page snapshot kept");
+    let trace = std::fs::read_to_string(last["trace"].as_str().expect("trace kept for a failure")).unwrap();
+    assert!(trace.contains("data:image/jpeg;base64,") && trace.contains("Missing button"), "steps with screenshots");
+    if swiftbrowse_chromium::launch::discover_ffmpeg().is_some() {
+        assert!(Path::new(last["video"].as_str().expect("video kept for a failure")).exists());
+    }
+    let flaky = r["tests"].as_array().unwrap().iter().find(|t| t["name"] == "flaky title").unwrap();
+    assert!(flaky["attempts"][1]["trace"].is_null(), "a passing attempt keeps no trace");
     assert!(stdout.contains("1 failed, 1 flaky, 1 skipped"), "{stdout}");
 
     let xml = std::fs::read_to_string(&junit).unwrap();

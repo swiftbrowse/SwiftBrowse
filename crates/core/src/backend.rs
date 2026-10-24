@@ -1,4 +1,5 @@
 use std::path::Path;
+
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -70,6 +71,14 @@ pub trait Backend: Send {
         Err(CoreError::unsupported("script evaluation is not available on this backend"))
     }
 
+    /// Starts recording the active tab (it follows tab switches).
+    async fn start_video(&mut self) -> Result<()> {
+        Err(CoreError::unsupported("video is not available on this backend"))
+    }
+    /// Stops recording and writes the video into `dir` as `<stem>.webm`.
+    async fn stop_video(&mut self, _dir: &Path, _stem: &str) -> Result<Value> {
+        Err(CoreError::unsupported("video is not available on this backend"))
+    }
     /// Cookies and per-origin localStorage, in Playwright's storageState format.
     async fn storage_state(&mut self) -> Result<Value> {
         Err(CoreError::unsupported("storage state is not available on this backend"))

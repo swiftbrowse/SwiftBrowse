@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use futures_util::stream::{self, StreamExt};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,13 @@ pub struct TestArgs {
     /// Budget for one test attempt, including hooks (default 30000).
     #[arg(long, default_value_t = 30_000)]
     test_timeout_ms: u64,
+    /// Record a trace: a screenshot and the page as text after every step, in one
+    /// self-contained trace.html per test. `retain-on-failure` keeps failed tests' only.
+    #[arg(long, value_enum, default_value = "off")]
+    trace: Record,
+    /// Record a video (WebM, needs ffmpeg: `npx playwright install ffmpeg`).
+    #[arg(long, value_enum, default_value = "off")]
+    video: Record,
     /// Console output: `list` (default), `dot`, `json` (results on stdout) or `quiet`.
     #[arg(long, default_value = "list")]
     reporter: String,
@@ -92,6 +99,13 @@ pub struct TestArgs {
     list: bool,
     #[command(flatten)]
     common: Common,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Record {
+    Off,
+    On,
+    RetainOnFailure,
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +422,14 @@ struct StepRecord {
     /// What an `evaluate` step returned.
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<Value>,
+    /// Trace: screenshot after the step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screenshot: Option<String>,
+    /// Trace: the page as text after the step.
+    #[serde(skip)]
+    page: Option<String>,
+    #[serde(skip)]
+    url: Option<String>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -426,6 +448,10 @@ struct Attempt {
     console_errors: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     network_failures: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video: Option<String>,
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq)]
@@ -459,6 +485,8 @@ struct Runner {
     output_dir: PathBuf,
     failures: AtomicUsize,
     max_failures: Option<usize>,
+    trace: Record,
+    video: Record,
 }
 
 fn slug(s: &str) -> String {
@@ -548,11 +576,18 @@ impl Runner {
                 return out;
             }
         };
+        let tracing = self.trace != Record::Off;
+        if self.video != Record::Off {
+            let r = mgr.execute(&id, Request::StartVideo(Default::default())).await;
+            if let Some(e) = r.error {
+                out.error = Some(format!("video not recorded: {}", e.message));
+            }
+        }
         let mut records = Vec::new();
         let body = async {
             for (phase, list) in [("before_each", &case.before[..]), ("test", &case.steps[..])] {
                 for step in list {
-                    if !run_step(&mut mgr, &id, phase, step, &mut records).await {
+                    if !run_step(&mut mgr, &id, phase, step, &mut records, tracing).await {
                         return false;
                     }
                 }
@@ -572,7 +607,7 @@ impl Runner {
             let teardown = async {
                 let mut all = true;
                 for step in case.after.iter() {
-                    all &= run_step(&mut mgr, &id, "after_each", step, &mut records).await;
+                    all &= run_step(&mut mgr, &id, "after_each", step, &mut records, tracing).await;
                 }
                 all
             };
@@ -584,10 +619,48 @@ impl Runner {
             }
             self.collect_failure(&mut mgr, &id, dir, &mut out).await;
         }
+        let keep = |mode: Record| mode == Record::On || (mode == Record::RetainOnFailure && !ok);
+        if self.video != Record::Off {
+            let stop = Request::StopVideo(swiftbrowse_core::request::StopVideoArgs { name: Some("video".into()) });
+            let r = mgr.execute(&id, stop).await;
+            let path = r.data.as_ref().and_then(|d| d["path"].as_str()).map(PathBuf::from);
+            match (path, keep(self.video)) {
+                (Some(p), true) => out.video = Some(p.display().to_string()),
+                (Some(p), false) => {
+                    let _ = std::fs::remove_file(&p).or_else(|_| std::fs::remove_dir_all(&p));
+                }
+                (None, _) => {
+                    if let Some(e) = r.error {
+                        out.error.get_or_insert(format!("video not saved: {}", e.message));
+                    }
+                }
+            }
+        }
+        let requests = if tracing {
+            let r = mgr.execute(&id, Request::GetRequests(Default::default())).await;
+            r.data.and_then(|d| d["requests"].as_array().cloned()).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         mgr.close_all().await;
         out.ok = ok;
         out.steps = records;
         out.duration_ms = started.elapsed().as_millis() as u64;
+        if tracing {
+            if keep(self.trace) {
+                let path = dir.join("trace.html");
+                let _ = std::fs::create_dir_all(dir);
+                if std::fs::write(&path, trace_html(&case.title, &out, &requests)).is_ok() {
+                    out.trace = Some(path.display().to_string());
+                }
+            }
+            // The trace embeds the step screenshots; the files are not needed after.
+            for s in &mut out.steps {
+                if let Some(p) = s.screenshot.take() {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        }
         out
     }
 
@@ -627,8 +700,21 @@ async fn run_step(
     phase: &'static str,
     step: &Step,
     records: &mut Vec<StepRecord>,
+    trace: bool,
 ) -> bool {
     let r = mgr.execute(id, step.request.clone()).await;
+    let (mut screenshot, mut page, mut url) = (None, None, None);
+    if trace {
+        let name = format!("step-{:03}", records.len() + 1);
+        let shot = mgr
+            .execute(id, Request::from_op("get_screenshot", json!({ "name": name, "format": "jpeg" })).expect("valid"))
+            .await;
+        screenshot = shot.data.as_ref().and_then(|d| d["path"].as_str()).map(str::to_string);
+        let snap =
+            mgr.execute(id, Request::from_op("get_page_snapshot", json!({ "format": "text" })).expect("valid")).await;
+        page = snap.data.as_ref().and_then(|d| d["text"].as_str()).map(str::to_string);
+        url = snap.page.as_ref().map(|p| p.url.clone());
+    }
     let checks = r.verification.as_ref().filter(|_| !r.ok).map(|v| {
         let failed: Vec<_> = v.checks.iter().filter(|c| !c.passed).collect();
         serde_json::to_value(failed).unwrap_or_default()
@@ -652,8 +738,110 @@ async fn run_step(
         error,
         checks,
         value,
+        screenshot,
+        page,
+        url,
     });
     r.ok
+}
+
+/// A self-contained trace: the steps on the left; the page after the selected
+/// step (screenshot and text) on the right; the requests below.
+fn trace_html(title: &str, a: &Attempt, requests: &[Value]) -> String {
+    use base64::Engine;
+    let esc = |s: &str| xml(s);
+    let mut steps = String::new();
+    for (i, s) in a.steps.iter().enumerate() {
+        let img = s
+            .screenshot
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .map(|b| format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(b)))
+            .unwrap_or_default();
+        let detail = json!({
+            "img": img,
+            "page": s.page.clone().unwrap_or_default(),
+            "url": s.url.clone().unwrap_or_default(),
+            "error": s.error.clone().unwrap_or_default(),
+            "checks": s.checks.clone().unwrap_or(Value::Null),
+            "value": s.value.clone().unwrap_or(Value::Null),
+        });
+        steps.push_str(&format!(
+            "<li class=\"{}\" data-i=\"{i}\" tabindex=\"0\"><span class=mark>{}</span><span class=phase>{}</span><code>{}</code><span class=ms>{} ms</span><script type=\"application/json\">{}</script></li>",
+            if s.ok { "ok" } else { "bad" },
+            if s.ok { "✓" } else { "✘" },
+            esc(s.phase),
+            esc(&s.step),
+            s.duration_ms,
+            detail.to_string().replace("</", "<\\/"),
+        ));
+    }
+    let mut reqs = String::new();
+    for r in requests.iter().rev().take(300).rev() {
+        reqs.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td class=url>{}</td></tr>",
+            esc(r["method"].as_str().unwrap_or("")),
+            r["status"].as_u64().map(|s| s.to_string()).unwrap_or_else(|| "–".into()),
+            if r["mocked"].as_bool() == Some(true) { "mocked" } else { "" },
+            esc(r["url"].as_str().unwrap_or("")),
+        ));
+    }
+    let video = a
+        .video
+        .as_deref()
+        .filter(|v| v.ends_with(".webm"))
+        .map(|_| "<h2>Video</h2><video controls src=\"video.webm\" style=\"max-width:100%\"></video>".to_string());
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trace</title>
+<style>
+:root {{ --bg:#fafafa; --fg:#1a1a1a; --muted:#666; --card:#fff; --line:#e3e3e3; --pass:#1a7f37; --fail:#cf222e; --sel:#ddf4ff; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --card:#161b22; --line:#30363d; --pass:#3fb950; --fail:#f85149; --sel:#1f3a5f; }} }}
+body {{ background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,sans-serif; margin:0; padding:16px; }}
+h1 {{ font-size:18px; margin:0 0 4px; }} h2 {{ font-size:15px; margin:20px 0 6px; }}
+.meta {{ color:var(--muted); margin-bottom:12px; }} .meta .bad {{ color:var(--fail); }}
+.wrap {{ display:grid; grid-template-columns:minmax(0,2fr) minmax(0,3fr); gap:16px; }}
+@media (max-width: 800px) {{ .wrap {{ grid-template-columns:1fr; }} }}
+ol {{ list-style:none; margin:0; padding:0; background:var(--card); border:1px solid var(--line); border-radius:6px; max-height:75vh; overflow:auto; }}
+li {{ padding:6px 8px; border-bottom:1px solid var(--line); cursor:pointer; display:grid; grid-template-columns:18px auto 1fr auto; gap:6px; align-items:baseline; }}
+li.sel {{ background:var(--sel); }} li.ok .mark {{ color:var(--pass); }} li.bad .mark, .err {{ color:var(--fail); }}
+.phase, .ms {{ color:var(--muted); font-size:12px; }}
+code, pre {{ font:12px ui-monospace,monospace; overflow-wrap:anywhere; }}
+pre {{ background:var(--card); border:1px solid var(--line); padding:8px; white-space:pre-wrap; max-height:40vh; overflow:auto; }}
+img {{ max-width:100%; border:1px solid var(--line); }}
+table {{ border-collapse:collapse; width:100%; font-size:12px; }} td {{ border-bottom:1px solid var(--line); padding:2px 6px; vertical-align:top; }} td.url {{ overflow-wrap:anywhere; }}
+</style></head><body>
+<h1>{title}</h1>
+<p class="meta">{status} · {ms} ms · {n} steps{error}</p>
+<div class="wrap"><ol id="steps">{steps}</ol>
+<div><p class="meta" id="url"></p><img id="shot" alt="Page after the selected step"><p class="err" id="err"></p><pre id="checks" hidden></pre><h2>Page as text</h2><pre id="page"></pre></div></div>
+{video}
+<h2>Requests</h2><table>{reqs}</table>
+<script>
+const items = [...document.querySelectorAll('#steps li')];
+function show(li) {{
+  items.forEach((x) => x.classList.toggle('sel', x === li));
+  const d = JSON.parse(li.querySelector('script').textContent);
+  const img = document.getElementById('shot'); img.src = d.img; img.hidden = !d.img;
+  document.getElementById('url').textContent = d.url;
+  document.getElementById('err').textContent = d.error;
+  const checks = document.getElementById('checks');
+  const extra = d.checks || d.value;
+  checks.hidden = extra === null; checks.textContent = extra === null ? '' : JSON.stringify(extra, null, 2);
+  document.getElementById('page').textContent = d.page;
+}}
+items.forEach((li) => {{ li.addEventListener('click', () => show(li)); li.addEventListener('keydown', (e) => {{ if (e.key === 'Enter') show(li); }}); }});
+if (items.length) show(items.find((x) => x.classList.contains('bad')) || items[items.length - 1]);
+</script></body></html>
+"#,
+        title = esc(title),
+        status = if a.ok { "passed" } else { "<span class=bad>failed</span>" },
+        ms = a.duration_ms,
+        n = a.steps.len(),
+        error = a.error.as_deref().map(|e| format!(" · <span class=bad>{}</span>", esc(e))).unwrap_or_default(),
+        video = video.unwrap_or_default(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +1125,8 @@ pub async fn run(args: TestArgs) -> ExitCode {
         output_dir: output_dir.clone(),
         failures: AtomicUsize::new(0),
         max_failures: if args.fail_fast { Some(1) } else { args.max_failures },
+        trace: args.trace,
+        video: args.video,
     });
     let reporter = args.reporter.as_str();
     if reporter == "list" {
@@ -1002,13 +1192,19 @@ pub async fn run(args: TestArgs) -> ExitCode {
     });
     let doc = json!({ "summary": summary, "tests": results });
     let _ = std::fs::write(output_dir.join("results.json"), serde_json::to_string_pretty(&doc).unwrap_or_default());
+    for p in [&args.junit, &args.html].into_iter().flatten() {
+        if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+            let _ = std::fs::create_dir_all(dir);
+        }
+    }
     if let Some(p) = &args.junit {
         if let Err(e) = std::fs::write(p, junit(&results, wall_ms)) {
             eprintln!("cannot write {}: {e}", p.display());
         }
     }
     if let Some(p) = &args.html {
-        if let Err(e) = std::fs::write(p, html(&results, &summary)) {
+        let report_dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        if let Err(e) = std::fs::write(p, html(&results, &summary, report_dir)) {
             eprintln!("cannot write {}: {e}", p.display());
         }
     }
@@ -1096,6 +1292,12 @@ fn print_failures(results: &[TestResult]) {
         }
         if let Some(p) = &a.screenshot {
             println!("     screenshot: {p}");
+        }
+        if let Some(p) = &a.trace {
+            println!("     trace: {p}");
+        }
+        if let Some(p) = &a.video {
+            println!("     video: {p}");
         }
         if let Some(page) = &a.page {
             println!("     page at failure:");
@@ -1204,7 +1406,18 @@ fn junit(results: &[TestResult], wall_ms: u64) -> String {
     out
 }
 
-fn html(results: &[TestResult], summary: &Value) -> String {
+/// `to` relative to the directory `from`, for links between report files.
+fn relative(from: &Path, to: &Path) -> String {
+    let abs = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (from, to) = (abs(from), abs(to));
+    let (f, t): (Vec<_>, Vec<_>) = (from.components().collect(), to.components().collect());
+    let common = f.iter().zip(&t).take_while(|(a, b)| a == b).count();
+    let mut parts: Vec<String> = vec!["..".into(); f.len() - common];
+    parts.extend(t[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
+    parts.join("/")
+}
+
+fn html(results: &[TestResult], summary: &Value, report_dir: &Path) -> String {
     use base64::Engine;
     let esc = |s: &str| xml(s);
     let mut rows = String::new();
@@ -1246,6 +1459,16 @@ fn html(results: &[TestResult], summary: &Value) -> String {
                     "<details><summary>Page at failure</summary><pre>{}</pre></details>",
                     esc(page)
                 ));
+            }
+            let mut links = Vec::new();
+            if let Some(t) = &a.trace {
+                links.push(format!("<a href=\"{}\">Trace</a>", esc(&relative(report_dir, Path::new(t)))));
+            }
+            if let Some(v) = &a.video {
+                links.push(format!("<a href=\"{}\">Video</a>", esc(&relative(report_dir, Path::new(v)))));
+            }
+            if !links.is_empty() {
+                body.push_str(&format!("<p>{}</p>", links.join(" · ")));
             }
         }
         if let Some(reason) = r.skip_reason.as_deref().filter(|s| !s.is_empty()) {

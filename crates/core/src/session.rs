@@ -183,7 +183,7 @@ impl Session {
             && self.policy.screenshot_on_failure
             && self.caps.support(names::SCREENSHOT) != Support::Unsupported
         {
-            match self.capture(&format!("{action_id}-failure"), &action_id, false).await {
+            match self.capture(&format!("{action_id}-failure"), &action_id, false, ImageFormat::Png).await {
                 Ok(ev) => ctx.evidence.push(ev),
                 Err(e) => ctx.notes.push(format!("failure screenshot not captured: {}", e.message)),
             }
@@ -528,6 +528,22 @@ impl Session {
                 }
                 Ok(Some(json!({ "files": selected })))
             }
+            Request::StartVideo(_) => {
+                self.backend.start_video().await?;
+                Ok(None)
+            }
+            Request::StopVideo(a) => {
+                let stem = a.name.clone().unwrap_or_else(|| "video".into());
+                // Validates the name like any evidence file.
+                p.evidence_path(&stem, "webm")?;
+                let saved = self.backend.stop_video(&p.evidence_dir, &stem).await?;
+                if let Some(path) = saved["path"].as_str() {
+                    let ev = Evidence { kind: "video".into(), path: path.into(), action_id: action_id.into() };
+                    self.evidence.push(ev.clone());
+                    ctx.evidence.push(ev);
+                }
+                Ok(Some(saved))
+            }
             Request::SaveStorageState(a) => {
                 let path = p.state_path(&a.name)?;
                 let state = self.backend.storage_state().await?;
@@ -699,7 +715,7 @@ impl Session {
             }
             Request::GetScreenshot(a) => {
                 let stem = a.name.clone().unwrap_or_else(|| action_id.to_string());
-                let ev = self.capture(&stem, action_id, a.full_page).await?;
+                let ev = self.capture(&stem, action_id, a.full_page, a.format).await?;
                 let data = json!({ "path": ev.path });
                 ctx.evidence.push(ev);
                 Ok(Some(data))
@@ -992,8 +1008,9 @@ impl Session {
         select(matches, strategy, target.nth)
     }
 
-    async fn capture(&mut self, stem: &str, action_id: &str, full_page: bool) -> Result<Evidence> {
-        let path = self.policy.evidence_path(stem, "png")?;
+    async fn capture(&mut self, stem: &str, action_id: &str, full_page: bool, format: ImageFormat) -> Result<Evidence> {
+        let ext = if format == ImageFormat::Jpeg { "jpg" } else { "png" };
+        let path = self.policy.evidence_path(stem, ext)?;
         std::fs::create_dir_all(&self.policy.evidence_dir)
             .map_err(|e| CoreError::backend(format!("cannot create evidence directory: {e}")))?;
         self.backend.screenshot(&path, full_page).await?;

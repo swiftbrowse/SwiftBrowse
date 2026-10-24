@@ -97,6 +97,20 @@ fn playwright_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// ffmpeg for video: `SWIFTBROWSE_FFMPEG`, Playwright's build
+/// (`npx playwright install ffmpeg`), then `ffmpeg` on `PATH`.
+pub fn discover_ffmpeg() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("SWIFTBROWSE_FFMPEG") {
+        return Some(PathBuf::from(p));
+    }
+    const BUILDS: &[&str] = &["ffmpeg-linux", "ffmpeg-mac", "ffmpeg-win64.exe"];
+    if let Some(p) = playwright_roots().iter().find_map(|root| newest_playwright_build(root, "ffmpeg-", BUILDS)) {
+        return Some(p);
+    }
+    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(name)).find(|p| p.is_file())
+}
+
 fn newest_playwright_build(root: &Path, prefix: &str, rels: &[&str]) -> Option<PathBuf> {
     let mut dirs: Vec<(u32, PathBuf)> = std::fs::read_dir(root)
         .ok()?

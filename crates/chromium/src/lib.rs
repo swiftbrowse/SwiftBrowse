@@ -5,6 +5,7 @@ mod cdp;
 pub mod daemon;
 mod keys;
 pub mod launch;
+mod video;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -164,6 +165,8 @@ struct Shared {
     requests: Mutex<VecDeque<RequestRecord>>,
     /// Network request ids answered by a route.
     mocked: Mutex<HashSet<String>>,
+    /// Screencast frames while a video is being recorded.
+    screencast: Mutex<Option<VecDeque<video::Frame>>>,
 }
 
 struct Mock {
@@ -575,6 +578,10 @@ impl ChromiumBackend {
         Ok(())
     }
 
+    fn screencast_params(&self) -> Value {
+        json!({ "format": "jpeg", "quality": 70, "maxWidth": self.viewport.0, "maxHeight": self.viewport.1, "everyNthFrame": 1 })
+    }
+
     fn tab_sessions(&self) -> Vec<String> {
         std::iter::once(&self.tab).chain(&self.others).map(|t| t.session.clone()).collect()
     }
@@ -596,6 +603,11 @@ impl ChromiumBackend {
             }
         };
         let previous = std::mem::replace(&mut self.tab, tab);
+        // A recording follows the active tab.
+        if self.shared.screencast.lock().unwrap().is_some() {
+            let _ = self.cdp.send("Page.stopScreencast", json!({}), Some(&previous.session), CMD_TIMEOUT).await;
+            let _ = self.send("Page.startScreencast", self.screencast_params()).await;
+        }
         self.others.push(previous);
         self.leave_frames();
         let _ = self.send("Page.bringToFront", json!({})).await;
@@ -1053,6 +1065,24 @@ async fn pump_events(
                 }
             }
             "Fetch.requestPaused" => answer_paused(p, &cdp, &session, &shared),
+            "Page.screencastFrame" => {
+                if let Some(frames) = shared.screencast.lock().unwrap().as_mut() {
+                    if let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(s(p, "data")) {
+                        if frames.len() >= video::MAX_FRAMES {
+                            frames.pop_front();
+                        }
+                        let timestamp = p["metadata"]["timestamp"].as_f64().unwrap_or(0.0);
+                        frames.push_back(video::Frame { timestamp, jpeg });
+                    }
+                }
+                // Chromium sends the next frame only after this one is acknowledged.
+                let (cdp, session, ack) = (cdp.clone(), session.clone(), p["sessionId"].clone());
+                tokio::spawn(async move {
+                    let _ = cdp
+                        .send("Page.screencastFrameAck", json!({ "sessionId": ack }), Some(&session), CMD_TIMEOUT)
+                        .await;
+                });
+            }
             "Network.requestWillBeSent" => {
                 let request_id = s(p, "requestId");
                 let mocked = shared.mocked.lock().unwrap().contains(&request_id);
@@ -1498,6 +1528,37 @@ impl Backend for ChromiumBackend {
         Ok(r["result"].get("value").cloned().unwrap_or(Value::Null))
     }
 
+    async fn start_video(&mut self) -> Result<()> {
+        *self.shared.screencast.lock().unwrap() = Some(VecDeque::new());
+        self.send("Page.startScreencast", self.screencast_params()).await.map(|_| ())
+    }
+
+    async fn stop_video(&mut self, dir: &Path, stem: &str) -> Result<Value> {
+        let _ = self.send("Page.stopScreencast", json!({})).await;
+        let frames: Vec<video::Frame> = self
+            .shared
+            .screencast
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| CoreError::invalid("no video is being recorded; start_video first"))?
+            .into();
+        let end =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let (dir, stem) = (dir.to_path_buf(), stem.to_string());
+        let count = frames.len();
+        let saved = tokio::task::spawn_blocking(move || video::save(&frames, end, &dir, &stem))
+            .await
+            .map_err(|e| CoreError::backend(format!("video encoding failed: {e}")))??;
+        Ok(match saved {
+            video::Recording::Video(path) => json!({ "path": path, "format": "webm", "frames": count }),
+            video::Recording::Frames { dir, count } => json!({
+                "path": dir, "format": "jpeg-frames", "frames": count,
+                "note": "no ffmpeg found (npx playwright install ffmpeg, or set SWIFTBROWSE_FFMPEG): kept the frames instead",
+            }),
+        })
+    }
+
     async fn storage_state(&mut self) -> Result<Value> {
         let mut params = json!({});
         if let Some(ctx) = &self.daemon_context {
@@ -1925,7 +1986,8 @@ impl Backend for ChromiumBackend {
     }
 
     async fn screenshot(&mut self, path: &Path, full_page: bool) -> Result<()> {
-        let mut params = json!({ "format": "png" });
+        let jpeg = path.extension().is_some_and(|e| e == "jpg" || e == "jpeg");
+        let mut params = if jpeg { json!({ "format": "jpeg", "quality": 70 }) } else { json!({ "format": "png" }) };
         if full_page {
             let m = self.send("Page.getLayoutMetrics", json!({})).await?;
             let size = &m["cssContentSize"];

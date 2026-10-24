@@ -22,6 +22,7 @@ test.describe('todos', () => {
   test('completes and filters items', async ({ page }) => {
     await page.getByLabel('New todo').fill('Write tests');
     await page.keyboard.press('Enter');
+    await expect(page.getByRole('checkbox', { name: 'Write tests' })).toBeVisible();
     await page.getByLabel('New todo').fill('Ship it');
     await page.keyboard.press('Enter');
     await expect(page.getByRole('checkbox')).toHaveCount(2);
@@ -37,6 +38,7 @@ test.describe('todos', () => {
   test('deletes and clears items', async ({ page }) => {
     await page.getByLabel('New todo').fill('One');
     await page.keyboard.press('Enter');
+    await expect(page.getByRole('checkbox', { name: 'One' })).toBeVisible();
     await page.getByLabel('New todo').fill('Two');
     await page.keyboard.press('Enter');
     await expect(page.getByRole('checkbox')).toHaveCount(2);

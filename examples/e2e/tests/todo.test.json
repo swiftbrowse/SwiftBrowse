@@ -29,7 +29,8 @@
       "name": "completes and filters items",
       "steps": [
         { "op": "fill", "target": "New todo", "value": "Write tests" },
-        { "op": "press_key", "key": "Enter" },
+        { "op": "press_key", "key": "Enter",
+          "expect": { "type": "visible", "target": { "by": "role", "role": "checkbox", "name": "Write tests" } } },
         { "op": "fill", "target": "New todo", "value": "Ship it" },
         { "op": "press_key", "key": "Enter",
           "expect": { "type": "count", "target": { "by": "role", "role": "checkbox" }, "count": 2 } },
@@ -48,7 +49,8 @@
       "name": "deletes and clears items",
       "steps": [
         { "op": "fill", "target": "New todo", "value": "One" },
-        { "op": "press_key", "key": "Enter" },
+        { "op": "press_key", "key": "Enter",
+          "expect": { "type": "visible", "target": { "by": "role", "role": "checkbox", "name": "One" } } },
         { "op": "fill", "target": "New todo", "value": "Two" },
         { "op": "press_key", "key": "Enter",
           "expect": { "type": "count", "target": { "by": "role", "role": "checkbox" }, "count": 2 } },
