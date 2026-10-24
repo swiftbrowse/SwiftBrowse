@@ -1,6 +1,6 @@
 # SwiftBrowse
 
-Agent-native browser automation with one contract across MCP, CLI and (planned) SDKs. Rust core, Chromium backend over the DevTools Protocol.
+**The AI browser for browser automation and end-to-end testing.** One contract across MCP, CLI and (planned) SDKs: agents drive it through MCP, and the same steps run as a CI test from a JSON flow. Rust core, Chromium backend over the DevTools Protocol.
 
 > **Status: Phase 1 of the product specification roadmap, plus the MCP server and CLI from Phase 4.** The cloud/headless Chromium path works and is tested. The Tauri/Wry desktop shell and the TypeScript/Python SDKs are **not started**. See [What exists](#what-exists).
 
@@ -35,6 +35,18 @@ The first headless session starts a background `swiftbrowse daemon` holding one 
 swiftbrowse daemon status    # running?, sessions served, spare ready
 swiftbrowse daemon stop
 ```
+
+## End-to-end testing
+
+A flow file is a test. Steps act on the page by role, label or text; `expect` on a step and `assert_page_state` check the outcome; `run` exits 0 when every step passes and 1 otherwise, so it drops into any CI job.
+
+```sh
+swiftbrowse run examples/form-signup.json   # ✓ per step, JSON report on stdout, exit code for CI
+```
+
+The same steps are the MCP tools, so a flow an agent worked out interactively can be saved and replayed as a regression test. The report carries evidence per action: what changed, console errors, failed requests.
+
+**Not there yet** compared with a test runner such as Playwright Test: one flow per `run` (no suite discovery, parallel workers, retries or fixtures), no JUnit/HTML reports, no traces, screenshots-on-failure or video, and Chromium only. A failing `expect` waits for the full step timeout (10 s by default) before failing.
 
 ## The contract
 

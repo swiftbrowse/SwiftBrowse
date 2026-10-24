@@ -47,3 +47,9 @@
 - **Evidence:** clippy is clean for x86_64/aarch64 macOS and x86_64 Windows; the daemon test is portable and runs in CI on all three. Runtime on macOS and Windows is proven only once CI runs; it was not run locally.
 - **Trade-off:** on Windows the browser listens on a localhost debugging port (random, not the daemon's endpoint), which other local processes of any user could reach. Chromium can take its pipe on Windows too, but that needs inheritable handles passed the way the C runtime expects, which Rust's standard library doesn't do; a follow-up if the port matters.
 - **Reversibility:** two-way door (`--no-daemon` everywhere).
+
+## 2026-10-24 · Position as "the AI browser for browser automation and end-to-end testing"
+- **Decided by:** the user. Reverses the earlier non-goal "being a general test runner".
+- **Why it's credible today:** a flow file runs as a test (`swiftbrowse run`, exit 0/1, per-step `expect` and `assert_page_state`, evidence report), and the same steps are the MCP tools, so agent runs can become regression tests.
+- **What the claim now requires:** run a directory of flows, JUnit output, screenshot on failure, retries; a fail-fast `expect`. Listed under Next in STRATEGY and as gaps in the README.
+- **Reversibility:** two-way door (wording).

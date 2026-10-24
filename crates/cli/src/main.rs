@@ -11,7 +11,7 @@ use swiftbrowse_chromium::{ChromiumFactory, DaemonMode};
 use swiftbrowse_core::{Policy, Request, SessionManager, SessionOptions};
 
 #[derive(Parser)]
-#[command(name = "swiftbrowse", version, about = "Agent-native browser automation")]
+#[command(name = "swiftbrowse", version, about = "The AI browser for browser automation and end-to-end testing")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

@@ -1,6 +1,6 @@
 [package]
 name = "swiftbrowse-cli"
-description = "SwiftBrowse command-line interface"
+description = "SwiftBrowse, the AI browser for browser automation and end-to-end testing: command-line interface"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
