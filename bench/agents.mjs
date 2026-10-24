@@ -37,6 +37,8 @@ process.env.SWIFTBROWSE_CHROMIUM = CHROME;
 const PW_MCP = path.join(here, 'node_modules/@playwright/mcp/cli.js');
 const PW_MCP_VERSION = JSON.parse(fs.readFileSync(path.join(here, 'node_modules/@playwright/mcp/package.json'))).version;
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-bench-'));
+// A private warm-browser daemon for the "warm daemon" contender.
+process.env.SWIFTBROWSE_DAEMON_SOCKET = path.join(WORK, 'daemon.sock');
 
 // ---------- pages ----------
 const formHtml = fs.readFileSync(path.join(here, '../crates/chromium/tests/fixtures/form.html'), 'utf8');
@@ -105,8 +107,8 @@ function refFrom(snapshot, role, name, style) {
 // ---------- contenders ----------
 const contenders = {
   swiftbrowse: {
-    label: 'SwiftBrowse MCP',
-    start: () => Mcp.start(SB_BIN, ['mcp', '--no-approval', '--evidence-dir', path.join(WORK, 'ev')]),
+    label: 'SwiftBrowse MCP (own browser)',
+    start: () => Mcp.start(SB_BIN, ['mcp', '--no-daemon', '--no-approval', '--evidence-dir', path.join(WORK, 'ev')]),
     async navigate(m, url) { return m.tool('navigate', { url }); },
     async formTask(m) {
       await m.tool('navigate', { url: `${BASE}/form` });
@@ -139,6 +141,12 @@ const contenders = {
       return !r.isError;
     },
   },
+};
+// Same flows, attached to the warm-browser daemon (started by the first run).
+contenders.swiftbrowse_daemon = {
+  ...contenders.swiftbrowse,
+  label: 'SwiftBrowse MCP (warm daemon)',
+  start: () => Mcp.start(SB_BIN, ['mcp', '--no-approval', '--evidence-dir', path.join(WORK, 'ev')]),
 };
 for (const [key, settle] of [['playwright_default', null], ['playwright_settle0', '0']]) {
   contenders[key] = {
@@ -210,6 +218,7 @@ for (const k of keys) {
   await m.stop();
 }
 server.close();
+execFileSync(SB_BIN, ['daemon', 'stop']);
 
 // ---------- report ----------
 const med = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
@@ -221,6 +230,7 @@ const env = {
   swiftbrowse: execFileSync(SB_BIN, ['--version']).toString().trim(),
   playwright_mcp: PW_MCP_VERSION,
   iterations: ITER, cold_runs: COLD,
+  note: 'warm daemon: cold_start is attach to an already-running daemon browser; its first-ever start costs the same as own browser',
 };
 let md = `# Agent tasks: SwiftBrowse MCP vs Playwright MCP\n\n${Object.entries(env).map(([k, v]) => `- **${k}**: ${v}`).join('\n')}\n\n`;
 md += 'Both servers are driven over MCP stdio as an agent would. formTask and largeTask: snapshot, take refs from it, act, confirm the outcome. largeDirect: act by role and name without a snapshot, then confirm. Bytes = text returned into the agent context across all tool calls of the task.\n\n';

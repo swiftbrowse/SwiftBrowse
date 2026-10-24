@@ -452,17 +452,28 @@
   const BUSY_CAP_MS = 1500;
   const busy = () => lastScriptChange > 0 && performance.now() - lastScriptChange < QUIET_MS;
 
+  // An empty page is only waited for while its scripts are changing the DOM:
+  // after EMPTY_GIVE_UP_MS without changes it is treated as genuinely empty,
+  // and later snapshots of the same document don't wait for content again.
+  const EMPTY_GIVE_UP_MS = 1000;
+  let emptyAccepted = false;
+  const wantsContent = () => !emptyAccepted && looksEmpty();
+
   async function settle(maxEmptyMs) {
-    if (!maxEmptyMs || (!looksEmpty() && !busy())) return {};
+    if (!maxEmptyMs || (!wantsContent() && !busy())) return {};
     const started = performance.now();
     for (;;) {
       await new Promise((res) => setTimeout(res, 16));
-      const empty = looksEmpty();
-      const elapsed = performance.now() - started;
+      const empty = wantsContent();
+      const now = performance.now();
+      const elapsed = now - started;
       if (!empty && !busy()) return { rendered_after_load_ms: Math.round(elapsed) };
-      if (elapsed >= (empty ? maxEmptyMs : BUSY_CAP_MS)) {
-        return { rendered_after_load_ms: Math.round(elapsed), still_empty: empty, still_changing: !empty };
+      const quietFor = now - Math.max(lastScriptChange, started);
+      if (empty && (quietFor >= EMPTY_GIVE_UP_MS || elapsed >= maxEmptyMs)) {
+        emptyAccepted = true;
+        return { rendered_after_load_ms: Math.round(elapsed), still_empty: true };
       }
+      if (!empty && elapsed >= BUSY_CAP_MS) return { rendered_after_load_ms: Math.round(elapsed), still_changing: true };
     }
   }
 

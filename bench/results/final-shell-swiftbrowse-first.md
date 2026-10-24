@@ -1,6 +1,6 @@
 # SwiftBrowse vs Playwright
 
-- **date**: 2026-10-24T05:33:46.088Z
+- **date**: 2026-10-24T06:01:30.728Z
 - **cpu**: Intel(R) Xeon(R) Processor @ 2.80GHz x4
 - **memory_gb**: 15.7
 - **os**: Linux 6.18.44-fc-v153
@@ -20,17 +20,18 @@ Times in ms. Lower is better. Ratio = SwiftBrowse p50 / Playwright p50 (< 1 mean
 
 | task | step | SwiftBrowse p50 | p95 | Playwright p50 | p95 | ratio |
 |---|---|---:|---:|---:|---:|---:|
-| cold_start | launch_to_loaded_page | 171.22 | 197.73 | 169.8 | 198.02 | 1.01 |
-| form_task | navigate | 19.79 | 26.53 | 20.78 | 29.59 | 0.95 |
-| form_task | fill_email | 6.15 | 9.75 | 36.87 | 47.01 | 0.17 |
-| form_task | fill_password | 5.24 | 7.27 | 8.21 | 12.19 | 0.64 |
-| form_task | select | 3.46 | 5.12 | 7.1 | 10.69 | 0.49 |
-| form_task | check | 18.38 | 27.91 | 43.2 | 51.31 | 0.43 |
-| form_task | submit_and_wait | 283.23 | 289.26 | 335.19 | 346.64 | 0.84 |
-| form_task | total | 335.51 | 354.03 | 451.53 | 471.41 | 0.74 |
-| snapshot_form | snapshot | 1.26 | 3.21 | 6.74 | 11.23 | 0.19 |
-| snapshot_large | snapshot | 18.34 | 32.33 | 156.92 | 184.32 | 0.12 |
-| semantic_lookup_large | role_and_name | 4.37 | 8.03 | 20.25 | 29.89 | 0.22 |
+| cold_start | launch_to_loaded_page | 158.6 | 185.63 | 153.48 | 173.69 | 1.03 |
+| cold_start | launch_to_loaded_page_warm_daemon | 54.61 | 62.54 | - | - | - |
+| form_task | navigate | 20.1 | 25.09 | 18.87 | 26.41 | 1.07 |
+| form_task | fill_email | 6.81 | 9.16 | 33.84 | 43.1 | 0.20 |
+| form_task | fill_password | 5.54 | 7.5 | 7.42 | 9.91 | 0.75 |
+| form_task | select | 3.58 | 5.51 | 6.46 | 9.3 | 0.55 |
+| form_task | check | 16 | 24.67 | 38.47 | 48.7 | 0.42 |
+| form_task | submit_and_wait | 282.26 | 287.83 | 333.19 | 343.33 | 0.85 |
+| form_task | total | 334.37 | 349.31 | 440.28 | 464.79 | 0.76 |
+| snapshot_form | snapshot | 1.07 | 1.32 | 5.82 | 7.27 | 0.18 |
+| snapshot_large | snapshot | 17.59 | 22.41 | 151.67 | 183.43 | 0.12 |
+| semantic_lookup_large | role_and_name | 3.11 | 5.51 | 20.99 | 30.09 | 0.15 |
 
 ## Snapshot output size (bytes an agent receives)
 

@@ -21,6 +21,21 @@ MCP client config:
 { "mcpServers": { "swiftbrowse": { "command": "/path/to/swiftbrowse", "args": ["mcp"] } } }
 ```
 
+## Warm-browser daemon (Linux)
+
+The first headless session starts a background `swiftbrowse daemon` holding one Chromium. That first start costs the same as before (~160 ms to a loaded page). After that, every new session (a new CLI run, a new MCP server, `session_create`) attaches to the warm browser instead of launching one: **~52 ms from process start to a loaded page.**
+
+- **Spare tab:** the daemon always keeps a spare tab ready, in a fresh browser context with its renderer booted and the session already set up (events, network, helper script, viewport). A new session takes it and navigates immediately, and the daemon prepares the next spare.
+- **Isolation:** one browser context per session, with separate cookies, storage and cache. Contexts are disposed when the session closes or its process disconnects. A client can only use the contexts, tabs and sessions it created or claimed; browser-wide commands (`Browser.close`, `Target.getTargets`, …) are refused.
+- **Access:** a Unix socket in a `0700` directory (`$XDG_RUNTIME_DIR/swiftbrowse/` or `/tmp/swiftbrowse-<uid>/`), with the peer's user id checked. No TCP port.
+- **Lifetime:** the daemon exits after 10 idle minutes, when its browser dies, or on `swiftbrowse daemon stop`; the next session starts a fresh one. The socket name includes the version, so clients never mix builds.
+- **Trade-off:** sessions share one browser *process* and are separated by browser context, not by process. The capability report says so for daemon sessions. Use `--no-daemon` (or `SWIFTBROWSE_DAEMON=off`) for one browser process per session. Headed sessions never use the daemon.
+
+```sh
+swiftbrowse daemon status    # running?, sessions served, spare ready
+swiftbrowse daemon stop
+```
+
 ## The contract
 
 Every interface sends the same `Request` and gets the same `ActionResult`. MCP tool names, CLI script `op`s and schemas are generated from one list (`crates/core/src/request.rs`).
@@ -74,12 +89,13 @@ The core retries only failures the backend guarantees happened *before* input re
 | sign-up form: fill ×2, select, check, submit, confirm | **335 ms · 7 calls · 1.1 KB** | 472 ms · 8 calls · 2.2 KB | 1,302 ms · 8 calls · 2.2 KB |
 | 400-row page, look first: snapshot, click "Edit row 250", confirm | **166 ms · 3 calls · 6.6 KB** | 1,037 ms · 4 calls · 152.6 KB | 1,604 ms · 4 calls · 152.6 KB |
 | 400-row page, direct: click by role and name, confirm | **153 ms · 2 calls · 0.2 KB** | 834 ms · 3 calls · 0.8 KB | 1,415 ms · 3 calls · 0.8 KB |
-| cold start → first page loaded | **175 ms** | 759 ms | 773 ms |
+| cold start → first page loaded, first-ever run (own browser) | **162 ms** | 704 ms | 715 ms |
+| cold start → first page loaded, any later run (warm daemon) | **52 ms** | 704 ms | 715 ms |
 
 Why it wins, and the caveats:
 - **Context:** snapshots and action results reach the agent as compact text (`ok click button "Sign up" [e12] · verified: text_visible`). The full structured result stays in `structuredContent`. SwiftBrowse snapshots are bounded (150 elements), while Playwright MCP's `browser_snapshot` returns the whole page. On the 400-row page that's 6.6 KB vs 152.6 KB, though the bounded snapshot doesn't contain row 250; the agent has to locate it, which the snapshot itself tells it to do.
 - **Calls:** `click` with `expect` acts and confirms in one call; Playwright MCP needs a separate `browser_wait_for`.
-- **Cold start:** the headless shell, a browser launched while the client is still connecting, and pipe transport.
+- **Cold start:** the headless shell, a browser launched while the client is still connecting, and pipe transport. After the first run, the warm-browser daemon hands each new session a prepared tab. Task timings are the same with and without the daemon (all rows above were also measured both ways).
 - Medians from one machine and two synthetic pages. Task flows are in `bench/agents.mjs`; neither server was tuned per task. Results: `bench/results/agents-*`.
 
 Run it: `cd bench && npm install && node agents.mjs ../target/release/swiftbrowse --iter 15 --cold 10 [--browser shell|full]`.
@@ -111,7 +127,8 @@ Latest run: 4× Xeon 2.1 GHz cloud container, Chrome for Testing 153.0.8010.12 h
 
 | task | SwiftBrowse | Playwright | ratio |
 |---|---:|---:|---:|
-| cold start → loaded page | 171 / 166 | 170 / 161 | 1.01 / 1.03 (parity) |
+| cold start → loaded page, own browser | 159 / 165 | 153 / 160 | 1.03 / 1.03 (parity) |
+| cold start → loaded page, warm daemon | **55 / 55** | 153 / 160 | **0.36 / 0.34** |
 | navigate | 19.8 / 19.0 | 20.8 / 18.8 | 0.95 / 1.01 |
 | navigate, 145 interleaved pairs ×3 | | | SwiftBrowse faster by 1.31 ± 0.89, 1.74 ± 0.83, 0.56 ± 0.74 ms (95% CI) |
 | fill (email) | 7.1 | 33.0 | 0.21 |
@@ -122,7 +139,7 @@ Latest run: 4× Xeon 2.1 GHz cloud container, Chrome for Testing 153.0.8010.12 h
 
 Read these with care:
 - SwiftBrowse is measured through MCP (a separate process, JSON over stdio); Playwright through its in-process library. SwiftBrowse still wins navigate by about 1 ms in paired runs, but block medians move ±5% between runs.
-- **Cold start is at parity, not a win.** With the same binary, both tools are bounded by Chromium's own startup (~100 ms to a usable tab) plus the first page load. Tried and measured without gain: pipe vs WebSocket transport, not waiting for setup replies before the first navigation, an initial startup tab, `--disable-gpu`, `--in-process-gpu`.
+- **Cold start with its own browser is at parity.** With the same binary, both tools are bounded by Chromium's own startup (~100 ms to a usable tab) plus the first page load. The warm-daemon row compares attaching to SwiftBrowse's running browser with Playwright launching one. Playwright could also connect to a running browser (`connectOverCDP`), but it doesn't keep or prepare one for you. Tried and measured without gain: pipe vs WebSocket transport, not waiting for setup replies before the first navigation, an initial startup tab, `--disable-gpu`, `--in-process-gpu`.
 - SwiftBrowse does *more* work in some steps: `fill` reads the value back, and `navigate` returns the real title and waits for client-rendered pages that are still empty.
 - Snapshots differ in format (line-per-element text with refs vs. ARIA YAML); on the large page SwiftBrowse is bounded to 150 elements, so sizes aren't equivalent content.
 - One machine and one fixture set. Full tables: `bench/results/`.
@@ -136,8 +153,9 @@ Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse
 | Shared Rust core (`crates/core`) | contract, locators, policy, sessions, verification, recovery, reports; mock backend for deterministic tests |
 | Chromium backend (`crates/chromium`) | CDP over WebSocket, per-session process + profile, isolated-world helper, trusted input, diagnostics, screenshots, AX tree |
 | MCP server (`crates/mcp`) | stdio, protocol 2024-11-05 / 2025-03-26 / 2025-06-18, generated schemas, output bounded to 256 KB |
-| CLI (`crates/cli`) | `doctor`, `capabilities`, `run`, `snapshot`, `screenshot`, `mcp` |
-| Tests | 23 core/MCP unit and engine tests, 4 real-browser integration suites, 1 signal-cleanup test of the real binary, 1 key-mapping test |
+| CLI (`crates/cli`) | `doctor`, `capabilities`, `run`, `snapshot`, `screenshot`, `mcp`, `daemon run/status/stop` |
+| Warm-browser daemon (`crates/chromium/src/daemon.rs`) | Linux; spare prepared tabs, per-client ownership, idle exit |
+| Tests | 23 core/MCP unit and engine tests, 4 real-browser integration suites, 1 signal-cleanup test and 1 daemon test (speed, isolation, refusals, cleanup) of the real binary, 1 key-mapping test |
 | CI (`.github/workflows/ci.yml`) | written, **not yet run** |
 | Desktop shell (Tauri/Wry) | not started; `doctor` reports WebView availability |
 | Remote/authenticated MCP transport | not started |

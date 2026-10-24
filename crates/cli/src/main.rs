@@ -7,7 +7,7 @@ use std::sync::Arc;
 use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use swiftbrowse_chromium::ChromiumFactory;
+use swiftbrowse_chromium::{ChromiumFactory, DaemonMode};
 use swiftbrowse_core::{Policy, Request, SessionManager, SessionOptions};
 
 #[derive(Parser)]
@@ -60,6 +60,27 @@ enum Command {
         #[command(flatten)]
         common: Common,
     },
+    /// Manage the warm-browser daemon that headless sessions attach to (Linux).
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Run the daemon in the foreground (clients start it automatically).
+    Run {
+        /// Exit after this many seconds without clients.
+        #[arg(long, default_value_t = 600)]
+        idle_timeout_secs: u64,
+        #[arg(long)]
+        chromium: Option<PathBuf>,
+    },
+    /// Show whether a daemon is running and what it is doing.
+    Status,
+    /// Stop the running daemon; its browser and all contexts close.
+    Stop,
 }
 
 #[derive(Args, Clone)]
@@ -87,6 +108,10 @@ struct Common {
     /// Do not require approval for consequential clicks (CI against test environments only).
     #[arg(long)]
     no_approval: bool,
+    /// Launch a browser for this process instead of attaching to the warm-browser
+    /// daemon (also `SWIFTBROWSE_DAEMON=off`).
+    #[arg(long)]
+    no_daemon: bool,
 }
 
 impl Common {
@@ -104,8 +129,24 @@ impl Common {
             policy.default_timeout_ms = t;
         }
         policy.require_approval_for_consequential = !self.no_approval;
-        let factory = ChromiumFactory { executable: self.chromium.clone(), ..Default::default() };
+        let factory =
+            ChromiumFactory { executable: self.chromium.clone(), daemon: self.daemon_mode(), ..Default::default() };
         SessionManager::new(Arc::new(factory), policy)
+    }
+
+    /// Headless sessions attach to the warm-browser daemon unless told not to.
+    fn daemon_mode(&self) -> DaemonMode {
+        let off = self.no_daemon || self.headed || std::env::var("SWIFTBROWSE_DAEMON").is_ok_and(|v| v == "off");
+        match std::env::current_exe() {
+            Ok(program) if !off && cfg!(target_os = "linux") => {
+                let mut args = vec!["daemon".to_string(), "run".to_string()];
+                if let Some(c) = &self.chromium {
+                    args.extend(["--chromium".to_string(), c.display().to_string()]);
+                }
+                DaemonMode::Auto { program, args }
+            }
+            _ => DaemonMode::Off,
+        }
     }
 
     fn options(&self) -> SessionOptions {
@@ -141,6 +182,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Doctor { json } => doctor::run(json),
+        Command::Daemon { action } => daemon_command(action).await,
         Command::Mcp { no_prewarm, common } => {
             let mut server = swiftbrowse_mcp::McpServer::new(common.manager(), common.options());
             if !no_prewarm {
@@ -270,4 +312,66 @@ async fn run_script(path: &PathBuf, common: &Common) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn daemon_request(method: &str) -> Option<Value> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = swiftbrowse_chromium::daemon::connect().await?;
+    let mut msg = json!({ "id": 1, "method": method }).to_string().into_bytes();
+    msg.push(0);
+    stream.write_all(&msg).await.ok()?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut chunk).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(end) = buf.iter().position(|b| *b == 0) {
+            return serde_json::from_slice::<Value>(&buf[..end]).ok().map(|v| v["result"].clone());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn daemon_command(action: DaemonAction) -> ExitCode {
+    use swiftbrowse_chromium::daemon;
+    match action {
+        DaemonAction::Run { idle_timeout_secs, chromium } => {
+            let options = daemon::DaemonOptions {
+                executable: chromium.or_else(|| std::env::var_os("SWIFTBROWSE_CHROMIUM").map(PathBuf::from)),
+                idle_timeout: std::time::Duration::from_secs(idle_timeout_secs),
+                no_sandbox: swiftbrowse_chromium::launch::needs_no_sandbox(),
+            };
+            match daemon::run(options).await {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("swiftbrowse daemon: {}", e.message);
+                    std::process::exit(1)
+                }
+            }
+        }
+        DaemonAction::Status => match daemon_request("SwiftBrowse.status").await {
+            Some(status) => {
+                print(&json!({ "running": true, "socket": daemon::socket_path(), "status": status }));
+                ExitCode::SUCCESS
+            }
+            None => {
+                print(&json!({ "running": false, "socket": daemon::socket_path() }));
+                ExitCode::FAILURE
+            }
+        },
+        DaemonAction::Stop => {
+            let stopped = daemon_request("SwiftBrowse.shutdown").await.is_some();
+            print(&json!({ "stopped": stopped }));
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn daemon_command(_action: DaemonAction) -> ExitCode {
+    fail("the warm-browser daemon is only available on Linux")
 }

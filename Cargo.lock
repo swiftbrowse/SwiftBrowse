@@ -794,6 +794,7 @@ dependencies = [
  "swiftbrowse-chromium",
  "swiftbrowse-core",
  "swiftbrowse-mcp",
+ "tempfile",
  "tokio",
 ]
 

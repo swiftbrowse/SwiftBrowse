@@ -1,0 +1,548 @@
+//! Warm-browser daemon (Linux).
+//!
+//! One long-lived headless browser shared by many SwiftBrowse clients. Clients
+//! connect over a Unix socket in a user-only directory and speak plain CDP
+//! (NUL-delimited JSON). The daemon multiplexes them onto the browser's pipe:
+//!
+//! - every client works only on browser contexts, tabs and sessions it created
+//!   or claimed; browser-wide commands such as `Browser.close` are refused;
+//! - a spare tab, in its own fresh context with its renderer already booted, is
+//!   kept ready; `SwiftBrowse.claimSpare` hands it over and a new one is made;
+//! - a client's contexts (cookies, storage, cache) are disposed when it
+//!   disconnects;
+//! - the daemon exits after an idle timeout, when the browser dies, or on
+//!   `SwiftBrowse.shutdown`; the next client starts a fresh one.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde_json::{json, Value};
+use swiftbrowse_core::{CoreError, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{mpsc, oneshot};
+
+use crate::launch;
+
+pub const ENV_SOCKET: &str = "SWIFTBROWSE_DAEMON_SOCKET";
+
+/// Socket path, versioned so a client never talks to a daemon from another build.
+pub fn socket_path() -> PathBuf {
+    if let Some(p) = std::env::var_os(ENV_SOCKET) {
+        return PathBuf::from(p);
+    }
+    let dir = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(runtime) => PathBuf::from(runtime).join("swiftbrowse"),
+        None => std::env::temp_dir().join(format!("swiftbrowse-{}", unsafe { libc::geteuid() })),
+    };
+    dir.join(format!("daemon-{}.sock", env!("CARGO_PKG_VERSION")))
+}
+
+/// Creates the socket directory, readable and writable by this user only.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    let meta = std::fs::metadata(dir)?;
+    if meta.uid() != unsafe { libc::geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "socket directory owned by another user",
+        ));
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+fn same_user(stream: &UnixStream) -> bool {
+    stream.peer_cred().is_ok_and(|c| c.uid() == unsafe { libc::geteuid() })
+}
+
+/// Connects to a running daemon, checking it runs as this user.
+pub async fn connect() -> Option<UnixStream> {
+    let stream = UnixStream::connect(socket_path()).await.ok()?;
+    same_user(&stream).then_some(stream)
+}
+
+pub struct DaemonOptions {
+    pub executable: Option<PathBuf>,
+    pub idle_timeout: Duration,
+    pub no_sandbox: bool,
+}
+
+enum Route {
+    Client { client: u64, id: Value, method: String },
+    Internal(oneshot::Sender<Value>),
+}
+
+#[derive(Default)]
+struct State {
+    next_id: u64,
+    next_client: u64,
+    routes: HashMap<u64, Route>,
+    clients: HashMap<u64, mpsc::UnboundedSender<String>>,
+    session_owner: HashMap<String, u64>,
+    target_owner: HashMap<String, u64>,
+    context_owner: HashMap<String, u64>,
+    spare: Option<(String, String, String)>,
+    spare_pending: bool,
+    claim_waiters: Vec<(u64, Value)>,
+    last_activity: Option<Instant>,
+    sessions_served: u64,
+}
+
+#[derive(Clone)]
+struct Daemon {
+    state: Arc<Mutex<State>>,
+    browser: mpsc::UnboundedSender<String>,
+    shutdown: Arc<tokio::sync::Notify>,
+    started: Instant,
+    version: Arc<Mutex<String>>,
+}
+
+impl Daemon {
+    fn touch(&self) {
+        self.state.lock().unwrap().last_activity = Some(Instant::now());
+    }
+
+    /// Sends a command on the daemon's own behalf.
+    async fn internal(&self, method: &str, params: Value) -> Result<Value> {
+        self.internal_on(None, method, params).await
+    }
+
+    async fn internal_on(&self, session: Option<&str>, method: &str, params: Value) -> Result<Value> {
+        let (tx, rx) = oneshot::channel();
+        let id = {
+            let mut st = self.state.lock().unwrap();
+            st.next_id += 1;
+            let id = st.next_id;
+            st.routes.insert(id, Route::Internal(tx));
+            id
+        };
+        let mut msg = json!({ "id": id, "method": method, "params": params });
+        if let Some(s) = session {
+            msg["sessionId"] = json!(s);
+        }
+        let _ = self.browser.send(msg.to_string());
+        let reply = tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .map_err(|_| CoreError::backend(format!("{method}: browser did not reply")))?
+            .map_err(|_| CoreError::backend("browser connection closed"))?;
+        match reply.get("error") {
+            Some(e) => Err(CoreError::backend(format!("{method}: {e}"))),
+            None => Ok(reply.get("result").cloned().unwrap_or(Value::Null)),
+        }
+    }
+
+    /// Keeps one spare tab ready in a fresh context ("refresh" after each claim).
+    fn refill_spare(&self) {
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.spare.is_some() || st.spare_pending {
+                return;
+            }
+            st.spare_pending = true;
+        }
+        let d = self.clone();
+        tokio::spawn(async move {
+            let made = async {
+                let ctx = d.internal("Target.createBrowserContext", json!({})).await?;
+                let ctx = ctx["browserContextId"].as_str().unwrap_or_default().to_string();
+                let target =
+                    d.internal("Target.createTarget", json!({ "url": "about:blank", "browserContextId": ctx })).await?;
+                let target = target["targetId"].as_str().unwrap_or_default().to_string();
+                // Attach and set the session up now, so the client that claims it
+                // can navigate straight away.
+                let attached =
+                    d.internal("Target.attachToTarget", json!({ "targetId": target, "flatten": true })).await?;
+                let session = attached["sessionId"].as_str().unwrap_or_default().to_string();
+                let setup = crate::session_setup(swiftbrowse_core::SessionOptions::default().viewport);
+                let replies =
+                    futures_util::future::join_all(setup.into_iter().map(|(m, p)| d.internal_on(Some(&session), m, p)))
+                        .await;
+                replies.into_iter().collect::<Result<Vec<_>>>()?;
+                Ok::<_, CoreError>((ctx, target, session))
+            }
+            .await;
+            let waiters = {
+                let mut st = d.state.lock().unwrap();
+                st.spare_pending = false;
+                if let Ok(spare) = made {
+                    st.spare = Some(spare);
+                }
+                std::mem::take(&mut st.claim_waiters)
+            };
+            for (client, id) in waiters {
+                d.claim(client, id);
+            }
+        });
+    }
+
+    fn reply(&self, client: u64, msg: Value) {
+        if let Some(tx) = self.state.lock().unwrap().clients.get(&client) {
+            let _ = tx.send(msg.to_string());
+        }
+    }
+
+    fn claim(&self, client: u64, id: Value) {
+        let taken = {
+            let mut st = self.state.lock().unwrap();
+            if !st.clients.contains_key(&client) {
+                return;
+            }
+            match st.spare.take() {
+                Some((ctx, target, session)) => {
+                    st.context_owner.insert(ctx.clone(), client);
+                    st.target_owner.insert(target.clone(), client);
+                    st.session_owner.insert(session.clone(), client);
+                    st.sessions_served += 1;
+                    Some((ctx, target, session))
+                }
+                None if st.spare_pending => {
+                    st.claim_waiters.push((client, id.clone()));
+                    return;
+                }
+                None => None,
+            }
+        };
+        let result = match &taken {
+            Some((ctx, target, session)) => {
+                json!({ "browserContextId": ctx, "targetId": target, "sessionId": session })
+            }
+            None => json!({}),
+        };
+        self.reply(client, json!({ "id": id, "result": result }));
+        self.refill_spare();
+    }
+
+    /// Checks a client command and forwards it, or answers it here.
+    fn on_client_message(&self, client: u64, text: &str) {
+        self.touch();
+        let Ok(msg) = serde_json::from_str::<Value>(text) else { return };
+        let id = msg.get("id").cloned().unwrap_or(Value::Null);
+        let method = msg.get("method").and_then(Value::as_str).unwrap_or_default().to_string();
+        let params = msg.get("params").cloned().unwrap_or(Value::Null);
+        let deny = |why: &str| {
+            self.reply(
+                client,
+                json!({ "id": id, "error": { "code": -32000, "message": format!("swiftbrowse daemon: {why}") } }),
+            )
+        };
+        match method.as_str() {
+            "SwiftBrowse.claimSpare" => return self.claim(client, id),
+            "SwiftBrowse.status" => {
+                let st = self.state.lock().unwrap();
+                let status = json!({
+                    "pid": std::process::id(),
+                    "clients": st.clients.len(),
+                    "sessions_served": st.sessions_served,
+                    "spare_ready": st.spare.is_some(),
+                    "uptime_ms": self.started.elapsed().as_millis() as u64,
+                    "browser": *self.version.lock().unwrap(),
+                });
+                drop(st);
+                return self.reply(client, json!({ "id": id, "result": status }));
+            }
+            "SwiftBrowse.shutdown" => {
+                self.reply(client, json!({ "id": id, "result": {} }));
+                self.shutdown.notify_one();
+                return;
+            }
+            _ => {}
+        }
+        {
+            let st = self.state.lock().unwrap();
+            let owns_ctx = |p: &str| params[p].as_str().is_some_and(|c| st.context_owner.get(c) == Some(&client));
+            let owns_target = |p: &str| params[p].as_str().is_some_and(|t| st.target_owner.get(t) == Some(&client));
+            let allowed = match msg.get("sessionId").and_then(Value::as_str) {
+                Some(session) => st.session_owner.get(session) == Some(&client),
+                None => match method.as_str() {
+                    "Browser.getVersion" | "Target.createBrowserContext" => true,
+                    "Target.createTarget" => owns_ctx("browserContextId"),
+                    "Target.attachToTarget" | "Target.closeTarget" => owns_target("targetId"),
+                    "Target.disposeBrowserContext" => owns_ctx("browserContextId"),
+                    _ => false,
+                },
+            };
+            if !allowed {
+                drop(st);
+                return deny(&format!("{method} is not allowed for this client"));
+            }
+        }
+        let global = {
+            let mut st = self.state.lock().unwrap();
+            st.next_id += 1;
+            let g = st.next_id;
+            st.routes.insert(g, Route::Client { client, id, method: method.clone() });
+            g
+        };
+        let mut out = msg;
+        out["id"] = json!(global);
+        if method == "Target.createBrowserContext" {
+            self.state.lock().unwrap().sessions_served += 1;
+        }
+        let _ = self.browser.send(out.to_string());
+    }
+
+    /// Routes one browser message to the client (or internal waiter) it belongs to.
+    fn on_browser_message(&self, text: &str) {
+        let Ok(mut msg) = serde_json::from_str::<Value>(text) else { return };
+        if let Some(global) = msg.get("id").and_then(Value::as_u64) {
+            let route = self.state.lock().unwrap().routes.remove(&global);
+            match route {
+                Some(Route::Internal(tx)) => {
+                    let _ = tx.send(msg);
+                }
+                Some(Route::Client { client, id, method }) => {
+                    {
+                        let mut st = self.state.lock().unwrap();
+                        let r = &msg["result"];
+                        match method.as_str() {
+                            "Target.createBrowserContext" => {
+                                if let Some(c) = r["browserContextId"].as_str() {
+                                    st.context_owner.insert(c.to_string(), client);
+                                }
+                            }
+                            "Target.createTarget" => {
+                                if let Some(t) = r["targetId"].as_str() {
+                                    st.target_owner.insert(t.to_string(), client);
+                                }
+                            }
+                            "Target.attachToTarget" => {
+                                if let Some(s) = r["sessionId"].as_str() {
+                                    st.session_owner.insert(s.to_string(), client);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    msg["id"] = id;
+                    self.reply(client, msg);
+                }
+                None => {}
+            }
+            return;
+        }
+        let session = msg.get("sessionId").and_then(Value::as_str).map(str::to_string);
+        let st = self.state.lock().unwrap();
+        match session {
+            Some(s) => {
+                if let Some(tx) = st.session_owner.get(&s).and_then(|c| st.clients.get(c)) {
+                    let _ = tx.send(text.to_string());
+                }
+            }
+            None => {
+                // Browser-level events only concern a client's own targets.
+                let target = msg["params"]["targetInfo"]["targetId"]
+                    .as_str()
+                    .or_else(|| msg["params"]["targetId"].as_str())
+                    .map(str::to_string);
+                if let Some(owner) = target.and_then(|t| st.target_owner.get(&t).copied()) {
+                    if let Some(tx) = st.clients.get(&owner) {
+                        let _ = tx.send(text.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    async fn disconnected(&self, client: u64) {
+        let contexts: Vec<String> = {
+            let mut st = self.state.lock().unwrap();
+            st.clients.remove(&client);
+            st.session_owner.retain(|_, c| *c != client);
+            st.target_owner.retain(|_, c| *c != client);
+            st.claim_waiters.retain(|(c, _)| *c != client);
+            let mine: Vec<String> =
+                st.context_owner.iter().filter(|(_, c)| **c == client).map(|(k, _)| k.clone()).collect();
+            st.context_owner.retain(|_, c| *c != client);
+            st.last_activity = Some(Instant::now());
+            mine
+        };
+        for ctx in contexts {
+            let _ = self.internal("Target.disposeBrowserContext", json!({ "browserContextId": ctx })).await;
+        }
+    }
+}
+
+/// Splits NUL-delimited messages out of a byte stream.
+async fn read_messages<R: tokio::io::AsyncRead + Unpin>(mut r: R, mut each: impl FnMut(&str)) {
+    let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        match r.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                let mut start = 0;
+                while let Some(end) = buf[start..].iter().position(|b| *b == 0) {
+                    if let Ok(text) = std::str::from_utf8(&buf[start..start + end]) {
+                        each(text);
+                    }
+                    start += end + 1;
+                }
+                buf.drain(..start);
+            }
+        }
+    }
+}
+
+async fn write_messages<W: tokio::io::AsyncWrite + Unpin>(mut w: W, mut rx: mpsc::UnboundedReceiver<String>) {
+    while let Some(msg) = rx.recv().await {
+        let mut bytes = msg.into_bytes();
+        bytes.push(0);
+        if w.write_all(&bytes).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Runs the daemon until idle timeout, browser exit or shutdown request.
+pub async fn run(options: DaemonOptions) -> Result<()> {
+    let path = socket_path();
+    let dir = path.parent().unwrap_or(Path::new("/tmp")).to_path_buf();
+    private_dir(&dir).map_err(|e| CoreError::backend(format!("cannot prepare {}: {e}", dir.display())))?;
+
+    // One daemon per socket: an exclusive lock decides races between clients
+    // that start one at the same moment.
+    let lock_path = path.with_extension("lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| CoreError::backend(format!("cannot open {}: {e}", lock_path.display())))?;
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Ok(()); // another daemon is running
+    }
+    let _ = std::fs::remove_file(&path);
+
+    let exe = options
+        .executable
+        .clone()
+        .or_else(launch::discover_headless_shell)
+        .or_else(launch::discover)
+        .ok_or_else(|| CoreError::unsupported("no Chromium found"))?;
+    let launched = launch::launch(&exe, true, options.no_sandbox, &[]).await?;
+    let launch::Transport::Pipe(to_browser, from_browser) = launched.transport else {
+        return Err(CoreError::unsupported("the daemon needs pipe transport"));
+    };
+    let mut child = launched.child;
+    let _profile = launched.profile;
+
+    let listener = UnixListener::bind(&path)
+        .map_err(|e| CoreError::backend(format!("cannot listen on {}: {e}", path.display())))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    let (browser_tx, browser_rx) = mpsc::unbounded_channel::<String>();
+    let daemon = Daemon {
+        state: Arc::new(Mutex::new(State { last_activity: Some(Instant::now()), ..State::default() })),
+        browser: browser_tx,
+        shutdown: Arc::new(tokio::sync::Notify::new()),
+        started: Instant::now(),
+        version: Arc::default(),
+    };
+    tokio::spawn(write_messages(to_browser, browser_rx));
+    let browser_gone = Arc::new(tokio::sync::Notify::new());
+    {
+        let d = daemon.clone();
+        let gone = browser_gone.clone();
+        tokio::spawn(async move {
+            read_messages(from_browser, |text| d.on_browser_message(text)).await;
+            gone.notify_one();
+        });
+    }
+    daemon.refill_spare();
+    {
+        let d = daemon.clone();
+        tokio::spawn(async move {
+            if let Ok(v) = d.internal("Browser.getVersion", json!({})).await {
+                *d.version.lock().unwrap() = v["product"].as_str().unwrap_or_default().to_string();
+            }
+        });
+    }
+
+    let mut idle = tokio::time::interval(Duration::from_millis(500));
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue };
+                if !same_user(&stream) {
+                    continue;
+                }
+                let d = daemon.clone();
+                let (tx, rx) = mpsc::unbounded_channel::<String>();
+                let client = {
+                    let mut st = d.state.lock().unwrap();
+                    st.next_client += 1;
+                    let client = st.next_client;
+                    st.clients.insert(client, tx);
+                    st.last_activity = Some(Instant::now());
+                    client
+                };
+                let (r, w) = stream.into_split();
+                tokio::spawn(write_messages(w, rx));
+                tokio::spawn(async move {
+                    read_messages(r, |text| d.on_client_message(client, text)).await;
+                    d.disconnected(client).await;
+                });
+            }
+            _ = idle.tick() => {
+                let st = daemon.state.lock().unwrap();
+                let idle_for = st.last_activity.map(|t| t.elapsed()).unwrap_or_default();
+                if st.clients.is_empty() && idle_for >= options.idle_timeout {
+                    break;
+                }
+            }
+            _ = daemon.shutdown.notified() => break,
+            _ = browser_gone.notified() => break,
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    let _ = tokio::time::timeout(Duration::from_secs(2), daemon.internal("Browser.close", json!({}))).await;
+    if tokio::time::timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+        let _ = child.kill().await;
+    }
+    Ok(())
+}
+
+/// Starts a daemon in the background, detached from the caller's session and
+/// signals, so it outlives the process that started it.
+pub fn spawn_detached(program: &Path, args: &[String]) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let log = socket_path().with_extension("log");
+    if let Some(dir) = log.parent() {
+        private_dir(dir)?;
+    }
+    let stderr = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(stderr);
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.spawn().map(|_| ())
+}
+
+/// Connects to the daemon, starting it first when `spawn` says how.
+pub async fn connect_or_spawn(spawn: Option<&(PathBuf, Vec<String>)>) -> Option<UnixStream> {
+    if let Some(s) = connect().await {
+        return Some(s);
+    }
+    let (program, args) = spawn?;
+    spawn_detached(program, args).ok()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let Some(s) = connect().await {
+            return Some(s);
+        }
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    None
+}

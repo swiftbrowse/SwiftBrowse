@@ -37,6 +37,9 @@ const pathOf = (name) => doctorChecks.find((c) => c.check === name)?.detail.spli
 const CHROME = BROWSER === 'full' ? pathOf('chromium') : pathOf('headless_shell');
 if (!CHROME) throw new Error(`no ${BROWSER} browser found (see swiftbrowse doctor)`);
 process.env.SWIFTBROWSE_CHROMIUM = CHROME;
+// Private warm-browser daemon for the "warm daemon" cold-start row.
+const DAEMON_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-bench-daemon-'));
+process.env.SWIFTBROWSE_DAEMON_SOCKET = path.join(DAEMON_DIR, 'daemon.sock');
 
 // ---------- pages ----------
 const formHtml = fs.readFileSync(path.join(here, '../crates/chromium/tests/fixtures/form.html'), 'utf8');
@@ -54,9 +57,9 @@ const BASE = `http://127.0.0.1:${server.address().port}`;
 
 // ---------- SwiftBrowse MCP client ----------
 class SwiftBrowse {
-  static async start() {
+  static async start(daemon = false) {
     const sb = new SwiftBrowse();
-    sb.proc = spawn(SB_BIN, ['mcp', '--no-approval', '--evidence-dir', path.join(os.tmpdir(), 'sb-bench-ev')], { stdio: ['pipe', 'pipe', 'inherit'] });
+    sb.proc = spawn(SB_BIN, ['mcp', ...(daemon ? [] : ['--no-daemon']), '--no-approval', '--evidence-dir', path.join(os.tmpdir(), 'sb-bench-ev')], { stdio: ['pipe', 'pipe', 'inherit'] });
     sb.lines = readline.createInterface({ input: sb.proc.stdout });
     sb.waiting = [];
     sb.lines.on('line', (l) => sb.waiting.shift()?.(JSON.parse(l)));
@@ -122,6 +125,15 @@ const pwForm = async (page, rec) => {
     await page.getByText('Welcome').waitFor();
   }))[0]);
 };
+
+// Every run after the first attaches to the daemon's warm browser.
+async function coldSwiftBrowseDaemon() {
+  const t = now();
+  const sb = await SwiftBrowse.start(true);
+  await sb.tool('navigate', { url: `${BASE}/form` });
+  record('cold_start', 'swiftbrowse', 'launch_to_loaded_page_warm_daemon', now() - t);
+  await sb.stop();
+}
 
 async function coldSwiftBrowse() {
   const t = now();
@@ -197,10 +209,13 @@ const ORDER = opt('--order', 'swiftbrowse-first');
 const coldPair = ORDER === 'playwright-first' ? [coldPlaywright, coldSwiftBrowse] : [coldSwiftBrowse, coldPlaywright];
 for (let i = 0; i < COLD + 1; i++) {
   for (const run of coldPair) await run();
+  await coldSwiftBrowseDaemon();
   if (i === 0) delete results.cold_start;
 }
 if (ORDER === 'playwright-first') { await runPlaywright(); await runSwiftBrowse(); } else { await runSwiftBrowse(); await runPlaywright(); }
 server.close();
+execFileSync(SB_BIN, ['daemon', 'stop']);
+fs.rmSync(DAEMON_DIR, { recursive: true, force: true });
 
 // ---------- report ----------
 const chromeVersion = execFileSync(CHROME, ['--version']).toString().trim();

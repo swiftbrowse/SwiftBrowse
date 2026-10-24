@@ -2,6 +2,8 @@
 //! session, driven over the Chrome DevTools Protocol.
 
 mod cdp;
+#[cfg(target_os = "linux")]
+pub mod daemon;
 mod keys;
 pub mod launch;
 
@@ -53,6 +55,18 @@ pub struct ChromiumFactory {
     /// Force `--no-sandbox` on or off; `None` means only when running as root.
     pub no_sandbox: Option<bool>,
     pub extra_args: Vec<String>,
+    /// Attach headless sessions to the warm-browser daemon (Linux).
+    pub daemon: DaemonMode,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum DaemonMode {
+    /// Every session launches its own browser process.
+    #[default]
+    Off,
+    /// Attach to the warm-browser daemon; start it with this command when none
+    /// is running. Falls back to launching a browser if the daemon is unavailable.
+    Auto { program: PathBuf, args: Vec<String> },
 }
 
 #[async_trait]
@@ -62,6 +76,16 @@ impl BackendFactory for ChromiumFactory {
     }
 
     async fn launch(&self, options: &SessionOptions) -> Result<Box<dyn Backend>> {
+        #[cfg(target_os = "linux")]
+        if let (DaemonMode::Auto { program, args }, true) = (&self.daemon, options.headless) {
+            let spawn = (program.clone(), args.clone());
+            if let Some(stream) = daemon::connect_or_spawn(Some(&spawn)).await {
+                match ChromiumBackend::attach_daemon(stream, options).await {
+                    Ok(backend) => return Ok(Box::new(backend)),
+                    Err(e) => trace_event(&format!("daemon attach failed, launching instead: {}", e.message)),
+                }
+            }
+        }
         let exe = self.executable.clone().or_else(|| {
             let shell = if options.headless { launch::discover_headless_shell() } else { None };
             shell.or_else(launch::discover)
@@ -111,8 +135,11 @@ pub struct ChromiumBackend {
     session: String,
     state: Arc<Mutex<State>>,
     lifecycle: watch::Receiver<u64>,
-    child: tokio::process::Child,
+    /// The browser process, when this session owns one (not when attached to the daemon).
+    child: Option<tokio::process::Child>,
     profile: Option<tempfile::TempDir>,
+    /// The browser context this session owns inside the shared daemon browser.
+    daemon_context: Option<String>,
     pump: tokio::task::JoinHandle<()>,
     version: Option<String>,
     headless_shell: bool,
@@ -142,7 +169,7 @@ impl ChromiumBackend {
         let (cdp, events) = match launched.transport {
             launch::Transport::WebSocket(ref url) => Cdp::connect(url).await?,
             #[cfg(target_os = "linux")]
-            launch::Transport::Pipe(to_browser, from_browser) => Cdp::over_pipe(to_browser, from_browser),
+            launch::Transport::Pipe(to_browser, from_browser) => Cdp::over_stream(to_browser, from_browser),
         };
         let stderr_tail = launched.stderr_tail.clone();
         let startup_error = move |e: CoreError| {
@@ -172,10 +199,75 @@ impl ChromiumBackend {
                 "targetId",
             ),
         };
-        let attached = cdp
-            .send("Target.attachToTarget", json!({ "targetId": target_id, "flatten": true }), None, CMD_TIMEOUT)
-            .await?;
-        let session = s(&attached, "sessionId");
+        let mut backend = Self::open_page(cdp, events, target_id, None, options, t0).await?;
+        backend.child = Some(launched.child);
+        backend.profile = Some(launched.profile);
+        backend.version = version;
+        backend.headless_shell = launch::is_headless_shell(exe);
+        backend.no_sandbox = no_sandbox;
+        Ok(backend)
+    }
+
+    /// Attaches to the warm-browser daemon: takes its spare tab (renderer already
+    /// booted) in a fresh browser context, or makes its own context and tab.
+    #[cfg(target_os = "linux")]
+    pub async fn attach_daemon(stream: tokio::net::UnixStream, options: &SessionOptions) -> Result<Self> {
+        let t0 = Instant::now();
+        let (r, w) = stream.into_split();
+        let (cdp, events) = Cdp::over_stream(w, r);
+        let (version, spare) = tokio::join!(
+            cdp.send("Browser.getVersion", json!({}), None, CMD_TIMEOUT),
+            cdp.send("SwiftBrowse.claimSpare", json!({}), None, CMD_TIMEOUT),
+        );
+        let spare = spare?;
+        let prepared = spare["sessionId"].as_str().map(str::to_string);
+        let (context, target_id) = match (spare["browserContextId"].as_str(), spare["targetId"].as_str()) {
+            (Some(c), Some(t)) => (c.to_string(), t.to_string()),
+            _ => {
+                let c = s(
+                    &cdp.send("Target.createBrowserContext", json!({}), None, CMD_TIMEOUT).await?,
+                    "browserContextId",
+                );
+                let t = cdp
+                    .send(
+                        "Target.createTarget",
+                        json!({ "url": "about:blank", "browserContextId": c }),
+                        None,
+                        CMD_TIMEOUT,
+                    )
+                    .await?;
+                (c, s(&t, "targetId"))
+            }
+        };
+        trace(t0, "daemon tab claimed");
+        let mut backend = Self::open_page(cdp, events, target_id, prepared, options, t0).await?;
+        backend.version = version.ok().map(|v| s(&v, "product"));
+        backend.daemon_context = Some(context);
+        backend.headless_shell = true;
+        Ok(backend)
+    }
+
+    /// Attaches to a page target and enables everything a session needs.
+    /// `prepared`: a session the daemon already attached and set up (see
+    /// [`session_setup`]); otherwise this attaches and sets up a new one.
+    async fn open_page(
+        cdp: Cdp,
+        events: tokio::sync::mpsc::UnboundedReceiver<cdp::Event>,
+        target_id: String,
+        prepared: Option<String>,
+        options: &SessionOptions,
+        t0: Instant,
+    ) -> Result<Self> {
+        let trace = |phase: &str| trace(t0, phase);
+        let session = match &prepared {
+            Some(session) => session.clone(),
+            None => {
+                let attached = cdp
+                    .send("Target.attachToTarget", json!({ "targetId": target_id, "flatten": true }), None, CMD_TIMEOUT)
+                    .await?;
+                s(&attached, "sessionId")
+            }
+        };
         trace("page target attached");
 
         let state = Arc::new(Mutex::new(State::default()));
@@ -184,20 +276,14 @@ impl ChromiumBackend {
 
         // Independent setup commands go out together instead of one round trip each.
         let sid = Some(session.as_str());
-        let setup = [
-            ("Page.enable", json!({})),
-            ("Page.setLifecycleEventsEnabled", json!({ "enabled": true })),
-            ("Runtime.enable", json!({})),
-            ("Network.enable", json!({})),
-            ("Log.enable", json!({})),
-            // Chromium creates the isolated world and runs the helper itself on every
-            // new document, saving two round trips after each navigation.
-            ("Page.addScriptToEvaluateOnNewDocument", json!({ "source": HELPER, "worldName": WORLD })),
-            (
-                "Emulation.setDeviceMetricsOverride",
-                json!({ "width": options.viewport.0, "height": options.viewport.1, "deviceScaleFactor": 1, "mobile": false }),
-            ),
-        ];
+        let setup = match prepared {
+            None => session_setup(options.viewport),
+            // Already done by the daemon with the default viewport.
+            Some(_) if options.viewport == SessionOptions::default().viewport => Vec::new(),
+            Some(_) => {
+                session_setup(options.viewport).into_iter().filter(|(m, _)| m.starts_with("Emulation.")).collect()
+            }
+        };
         // A page target's main frame id is its target id. Set it before setup so
         // lifecycle events for the first document are recognised.
         state.lock().unwrap().main_frame = target_id.clone();
@@ -218,14 +304,15 @@ impl ChromiumBackend {
             session,
             state,
             lifecycle: lc_rx,
-            child: launched.child,
-            profile: Some(launched.profile),
+            child: None,
+            profile: None,
+            daemon_context: None,
             pump,
-            version,
+            version: None,
             worlds_at_click: 0,
-            headless_shell: launch::is_headless_shell(exe),
+            headless_shell: false,
             headless: options.headless,
-            no_sandbox,
+            no_sandbox: false,
         })
     }
 
@@ -374,11 +461,13 @@ impl Drop for ChromiumBackend {
     /// kill the process and let it exit before the profile directory is removed.
     fn drop(&mut self) {
         self.pump.abort();
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.start_kill();
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
+        if let Some(child) = self.child.as_mut() {
+            if matches!(child.try_wait(), Ok(None)) {
+                let _ = child.start_kill();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
         }
         // Helper processes can still be writing for a moment after the browser
@@ -393,6 +482,25 @@ impl Drop for ChromiumBackend {
             }
         }
     }
+}
+
+/// Commands every page session runs before use. The daemon runs them on its
+/// spare tab ahead of time so a claiming client can skip them.
+pub(crate) fn session_setup(viewport: (u32, u32)) -> Vec<(&'static str, Value)> {
+    vec![
+        ("Page.enable", json!({})),
+        ("Page.setLifecycleEventsEnabled", json!({ "enabled": true })),
+        ("Runtime.enable", json!({})),
+        ("Network.enable", json!({})),
+        ("Log.enable", json!({})),
+        // Chromium creates the isolated world and runs the helper itself on every
+        // new document, saving two round trips after each navigation.
+        ("Page.addScriptToEvaluateOnNewDocument", json!({ "source": HELPER, "worldName": WORLD })),
+        (
+            "Emulation.setDeviceMetricsOverride",
+            json!({ "width": viewport.0, "height": viewport.1, "deviceScaleFactor": 1, "mobile": false }),
+        ),
+    ]
 }
 
 static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -613,6 +721,12 @@ async fn pump_events(
 impl Backend for ChromiumBackend {
     fn capabilities(&self) -> CapabilityReport {
         let mut warnings = Vec::new();
+        if self.daemon_context.is_some() {
+            warnings.push(
+                "shared warm browser (daemon): this session is isolated by its own browser context, not by a separate process"
+                    .into(),
+            );
+        }
         if self.no_sandbox {
             warnings.push(
                 "Chromium sandbox disabled (running as root or SWIFTBROWSE_NO_SANDBOX=1); use a container boundary"
@@ -638,7 +752,11 @@ impl Backend for ChromiumBackend {
                 cap(names::DIALOGS, Support::Partial, Some("alerts accepted, confirm/prompt dismissed automatically and reported")),
                 cap(names::FRAMES, Support::Partial, Some("main frame only")),
                 cap(names::SHADOW_DOM, Support::Partial, Some("open shadow roots for semantic and text locators; CSS does not pierce")),
-                cap(names::ISOLATED_SESSIONS, Support::Full, Some("separate process and profile per session")),
+                if self.daemon_context.is_some() {
+                    cap(names::ISOLATED_SESSIONS, Support::Partial, Some("separate browser context per session in a shared browser"))
+                } else {
+                    cap(names::ISOLATED_SESSIONS, Support::Full, Some("separate process and profile per session"))
+                },
                 cap(names::DOWNLOADS, Support::Unsupported, None),
                 cap(names::UPLOADS, Support::Unsupported, None),
                 cap(names::VISUAL_GROUNDING, Support::Unsupported, None),
@@ -894,9 +1012,15 @@ impl Backend for ChromiumBackend {
     }
 
     async fn close(&mut self) -> Result<()> {
-        let _ = self.cdp.send("Browser.close", json!({}), None, Duration::from_secs(3)).await;
-        if tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await.is_err() {
-            let _ = self.child.kill().await;
+        if let Some(context) = self.daemon_context.take() {
+            // Shared browser: drop only this session's context (and its data).
+            let params = json!({ "browserContextId": context });
+            let _ = self.cdp.send("Target.disposeBrowserContext", params, None, Duration::from_secs(3)).await;
+        } else if let Some(child) = self.child.as_mut() {
+            let _ = self.cdp.send("Browser.close", json!({}), None, Duration::from_secs(3)).await;
+            if tokio::time::timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+                let _ = child.kill().await;
+            }
         }
         self.pump.abort();
         Ok(())

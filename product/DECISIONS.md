@@ -33,3 +33,10 @@
 
 ## 2026-10-24 · Cold start: stop at Chromium's floor
 - Tried: not waiting for setup replies (no gain, and it lost early network events, so reverted), an initial startup tab (gain only over WebSocket), GPU flags (no gain). Against the Playwright library on the same binary, cold start is at parity. The next step would be a warm browser pool or daemon, which changes the isolation model; not taken without a decision.
+
+## 2026-10-24 · Warm-browser daemon, on by default for headless sessions (Linux)
+- **Asked for:** keep the first action's cold start, then make later sessions attach to a live, refreshed browser.
+- **Built:** a per-user daemon on a `0700` Unix socket with a peer uid check. One Chromium; a spare tab with its session already set up; one browser context per client; ownership checks on every forwarded command; contexts disposed on disconnect; idle exit after 10 minutes.
+- **Result:** first run ~160 ms (unchanged); later runs ~52 ms to a loaded page (Playwright MCP ~704 ms, Playwright library ~155 ms).
+- **Trade-off:** sessions are isolated by browser context, not by process (the capability report says so). `--no-daemon` / `SWIFTBROWSE_DAEMON=off` restores one process per session.
+- **Reversibility:** two-way door (the default can flip to off without breaking anything).

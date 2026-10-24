@@ -39,7 +39,7 @@ fn wait_until(mut f: impl FnMut() -> bool) -> bool {
 
 fn run(signal: &str) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_swiftbrowse"))
-        .args(["mcp", "--evidence-dir", std::env::temp_dir().join("sb-signal-test").to_str().unwrap()])
+        .args(["mcp", "--no-daemon", "--evidence-dir", std::env::temp_dir().join("sb-signal-test").to_str().unwrap()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

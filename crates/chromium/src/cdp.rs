@@ -86,14 +86,14 @@ impl Cdp {
         Ok((cdp, ev_rx))
     }
 
-    /// Talks over `--remote-debugging-pipe`: NUL-terminated JSON on two pipes.
-    /// Commands can be written before the browser has finished starting; it
-    /// reads them as soon as it can.
-    #[cfg(unix)]
-    pub fn over_pipe(
-        mut to_browser: tokio::net::unix::pipe::Sender,
-        mut from_browser: tokio::net::unix::pipe::Receiver,
-    ) -> (Cdp, mpsc::UnboundedReceiver<Event>) {
+    /// Talks NUL-terminated JSON over a byte stream: `--remote-debugging-pipe`
+    /// or the warm-browser daemon's socket. Commands can be written before the
+    /// other side is ready; it reads them as soon as it can.
+    pub fn over_stream<W, R>(mut to_browser: W, mut from_browser: R) -> (Cdp, mpsc::UnboundedReceiver<Event>)
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let (cdp, mut rx, pending) = Self::new_parts();
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
