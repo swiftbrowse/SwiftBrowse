@@ -125,7 +125,8 @@ fn clients_without_the_token_are_dropped() {
     let mut s = std::os::unix::net::UnixStream::connect(&ep).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     s.write_all(b"{\"id\":1,\"method\":\"SwiftBrowse.hello\",\"params\":{\"token\":\"guess\"}}\0").unwrap();
-    s.write_all(b"{\"id\":2,\"method\":\"SwiftBrowse.status\"}\0").unwrap();
+    // The daemon may already have dropped us after the bad hello: then this write fails.
+    let _ = s.write_all(b"{\"id\":2,\"method\":\"SwiftBrowse.status\"}\0");
     let mut buf = Vec::new();
     let n = s.read_to_end(&mut buf).unwrap_or(0);
     assert_eq!(n, 0, "daemon answered an unauthenticated client: {}", String::from_utf8_lossy(&buf));

@@ -452,6 +452,9 @@ struct Attempt {
     trace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     video: Option<String>,
+    /// Why no video was saved, when one was asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    video_error: Option<String>,
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq)]
@@ -580,7 +583,7 @@ impl Runner {
         if self.video != Record::Off {
             let r = mgr.execute(&id, Request::StartVideo(Default::default())).await;
             if let Some(e) = r.error {
-                out.error = Some(format!("video not recorded: {}", e.message));
+                out.video_error = Some(format!("not recorded: {}", e.message));
             }
         }
         let mut records = Vec::new();
@@ -631,7 +634,7 @@ impl Runner {
                 }
                 (None, _) => {
                     if let Some(e) = r.error {
-                        out.error.get_or_insert(format!("video not saved: {}", e.message));
+                        out.video_error.get_or_insert(format!("not saved: {}", e.message));
                     }
                 }
             }
@@ -1298,6 +1301,9 @@ fn print_failures(results: &[TestResult]) {
         }
         if let Some(p) = &a.video {
             println!("     video: {p}");
+        }
+        if let Some(e) = &a.video_error {
+            println!("     video {e}");
         }
         if let Some(page) = &a.page {
             println!("     page at failure:");

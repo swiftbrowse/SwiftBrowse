@@ -1535,6 +1535,19 @@ impl Backend for ChromiumBackend {
 
     async fn stop_video(&mut self, dir: &Path, stem: &str) -> Result<Value> {
         let _ = self.send("Page.stopScreencast", json!({})).await;
+        // The screencast only sends frames when the page repaints, and some
+        // platforms send none for a short run: end on a real capture of the page.
+        let last = self
+            .send("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 70 }))
+            .await
+            .ok()
+            .and_then(|r| base64::engine::general_purpose::STANDARD.decode(s(&r, "data")).ok());
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let streamed = self.shared.screencast.lock().unwrap().as_ref().map_or(0, VecDeque::len);
+        if let (Some(jpeg), Some(frames)) = (last, self.shared.screencast.lock().unwrap().as_mut()) {
+            frames.push_back(video::Frame { timestamp: now, jpeg });
+        }
         let frames: Vec<video::Frame> = self
             .shared
             .screencast
@@ -1550,8 +1563,9 @@ impl Backend for ChromiumBackend {
         let saved = tokio::task::spawn_blocking(move || video::save(&frames, end, &dir, &stem))
             .await
             .map_err(|e| CoreError::backend(format!("video encoding failed: {e}")))??;
+        let note = (streamed == 0).then_some("the browser streamed no frames; the video shows the final page only");
         Ok(match saved {
-            video::Recording::Video(path) => json!({ "path": path, "format": "webm", "frames": count }),
+            video::Recording::Video(path) => json!({ "path": path, "format": "webm", "frames": count, "note": note }),
             video::Recording::Frames { dir, count } => json!({
                 "path": dir, "format": "jpeg-frames", "frames": count,
                 "note": "no ffmpeg found (npx playwright install ffmpeg, or set SWIFTBROWSE_FFMPEG): kept the frames instead",

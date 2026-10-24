@@ -141,7 +141,8 @@ fn failures_retries_and_reports() {
     let trace = std::fs::read_to_string(last["trace"].as_str().expect("trace kept for a failure")).unwrap();
     assert!(trace.contains("data:image/jpeg;base64,") && trace.contains("Missing button"), "steps with screenshots");
     if swiftbrowse_chromium::launch::discover_ffmpeg().is_some() {
-        assert!(Path::new(last["video"].as_str().expect("video kept for a failure")).exists());
+        let video = last["video"].as_str().unwrap_or_else(|| panic!("video kept for a failure: {last}"));
+        assert!(Path::new(video).exists());
     }
     let flaky = r["tests"].as_array().unwrap().iter().find(|t| t["name"] == "flaky title").unwrap();
     assert!(flaky["attempts"][1]["trace"].is_null(), "a passing attempt keeps no trace");
