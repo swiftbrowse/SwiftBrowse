@@ -1,0 +1,118 @@
+{
+  "name": "pipilot.dev read-only agent tasks",
+  "stop_on_failure": false,
+  "steps": [
+    {
+      "op": "navigate",
+      "url": "https://pipilot.dev",
+      "timeout_ms": 30000
+    },
+    {
+      "op": "assert_page_state",
+      "name": "home rendered",
+      "conditions": [
+        {
+          "type": "visible",
+          "target": {
+            "by": "role",
+            "role": "heading",
+            "name": "Build client sites your clients can edit themselves.",
+            "exact": true
+          }
+        },
+        {
+          "type": "visible",
+          "target": {
+            "by": "role",
+            "role": "link",
+            "name": "Pricing",
+            "exact": true
+          }
+        }
+      ]
+    },
+    {
+      "op": "get_page_snapshot"
+    },
+    {
+      "op": "fill",
+      "target": {
+        "by": "role",
+        "role": "textbox",
+        "name": "Describe the app you want to build"
+      },
+      "value": "A booking site for a dental clinic"
+    },
+    {
+      "op": "click",
+      "target": {
+        "by": "role",
+        "role": "button",
+        "name": "Product",
+        "exact": true
+      }
+    },
+    {
+      "op": "get_page_snapshot",
+      "since_last": true
+    },
+    {
+      "op": "press_key",
+      "key": "Escape"
+    },
+    {
+      "op": "click",
+      "target": {
+        "by": "role",
+        "role": "link",
+        "name": "Pricing",
+        "exact": true,
+        "nth": 0
+      },
+      "expect": {
+        "type": "url_contains",
+        "value": "/pricing"
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "op": "get_page_snapshot"
+    },
+    {
+      "op": "click",
+      "target": {
+        "by": "role",
+        "role": "link",
+        "name": "Docs",
+        "exact": true,
+        "nth": 0
+      },
+      "expect": {
+        "type": "url_contains",
+        "value": "/docs"
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "op": "get_page_snapshot"
+    },
+    {
+      "op": "navigate",
+      "url": "https://pipilot.dev/switch/lovable",
+      "timeout_ms": 30000
+    },
+    {
+      "op": "get_page_snapshot"
+    },
+    {
+      "op": "get_screenshot",
+      "name": "pipilot-switch-lovable"
+    },
+    {
+      "op": "get_console_errors"
+    },
+    {
+      "op": "get_network_failures"
+    }
+  ]
+}

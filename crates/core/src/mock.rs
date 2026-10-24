@@ -183,7 +183,15 @@ impl Backend for MockBackend {
     async fn navigate(&mut self, url: &str, _w: WaitUntil, _t: Duration) -> Result<NavigationInfo> {
         self.load(url)?;
         let title = self.page_state().await?.title;
-        Ok(NavigationInfo { url: url.into(), title, status: Some(200), same_document: false })
+        Ok(NavigationInfo {
+            url: url.into(),
+            title,
+            status: Some(200),
+            same_document: false,
+            rendered_after_load_ms: None,
+            still_empty: false,
+            still_changing: false,
+        })
     }
 
     async fn page_state(&mut self) -> Result<PageState> {
@@ -206,6 +214,9 @@ impl Backend for MockBackend {
             truncated: all.len() > max,
             elements: all.into_iter().take(max).collect(),
             messages: Vec::new(),
+            rendered_after_load_ms: None,
+            still_empty: false,
+            still_changing: false,
         })
     }
 

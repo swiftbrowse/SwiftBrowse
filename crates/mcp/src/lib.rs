@@ -225,7 +225,10 @@ pub fn render(r: &ActionResult) -> String {
                     let kinds: Vec<&str> = v.checks.iter().filter_map(|c| c.condition["type"].as_str()).collect();
                     let _ = writeln!(out, "verified: {}", kinds.join(", "));
                 }
-                VerificationStatus::NotChecked => out.push_str("not verified: pass `expect` to confirm the outcome\n"),
+                VerificationStatus::NotChecked => {
+                    let note = v.note.as_deref().unwrap_or("pass `expect` to confirm the outcome");
+                    let _ = writeln!(out, "not verified: {note}");
+                }
                 VerificationStatus::Failed => {
                     for c in v.checks.iter().filter(|c| !c.passed) {
                         let _ = writeln!(out, "check failed: {} observed {}", c.condition, c.observed);
@@ -411,7 +414,7 @@ mod tests {
         // The agent-facing text is a compact summary, not the JSON result.
         let text = r["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("ok click button \"Go\" [e1] ("), "{text}");
-        assert!(text.contains("not verified: pass `expect`"), "{text}");
+        assert!(text.contains("not verified: "), "{text}");
         assert!(text.contains("page: A | https://a.test/"), "{text}");
         assert!(!text.contains('{'), "no JSON in a plain success: {text}");
 

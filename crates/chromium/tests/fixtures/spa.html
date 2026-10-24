@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><title>Client app</title></head>
+<body><div id="root"></div>
+<!-- Hidden early content (icon sprite, pixel) must not count as rendered -->
+<svg style="display:none"><symbol id="i"></symbol></svg><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width="0" height="0" alt="">
+<script>
+  // Renders after load, like a client-side app fetching its bundle.
+  addEventListener('load', () => setTimeout(() => {
+    document.getElementById('root').innerHTML = '<h1>Dashboard</h1><button>Build</button>';
+  }, 250));
+</script></body></html>

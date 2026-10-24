@@ -2,6 +2,20 @@
 // its globals, so page scripts cannot read or tamper with it.
 (() => {
   if (globalThis.__sb) return;
+
+  // Script-driven DOM changes: elements added or removed after DOMContentLoaded
+  // (parsing doesn't count). Installed at document start, so it sees an app's
+  // whole render.
+  let lastScriptChange = 0;
+  let parsed = document.readyState !== 'loading';
+  if (!parsed) document.addEventListener('DOMContentLoaded', () => { parsed = true; }, { once: true });
+  new MutationObserver((ms) => {
+    if (!parsed) return;
+    for (const m of ms) {
+      for (const n of m.addedNodes) if (n.nodeType === 1) { lastScriptChange = performance.now(); return; }
+      for (const n of m.removedNodes) if (n.nodeType === 1) { lastScriptChange = performance.now(); return; }
+    }
+  }).observe(document, { subtree: true, childList: true });
   const reg = new Map();
   const ids = new WeakMap();
   let next = 1;
@@ -94,7 +108,34 @@
     }
   }
 
-  function textOf(n) { return norm(n.innerText !== undefined ? n.innerText : n.textContent); }
+  // innerText is empty for content the browser hasn't rendered (content-visibility:
+  // auto off-screen, virtualized lists) and ignores image/SVG labels, so fall
+  // back to computing the text from the DOM like the accessible-name algorithm.
+  function textOf(n) {
+    const t = norm(n.innerText !== undefined ? n.innerText : n.textContent);
+    return t || norm(contentText(n, 0)).slice(0, 300);
+  }
+
+  function contentText(node, depth) {
+    if (depth > 25) return '';
+    const out = [];
+    for (const c of node.childNodes) {
+      if (c.nodeType === 3) { out.push(c.data); continue; }
+      if (c.nodeType !== 1 || c.getAttribute('aria-hidden') === 'true') continue;
+      const st = getComputedStyle(c);
+      if (st.display === 'none' || st.visibility === 'hidden' || SKIP_TEXT.has(c.tagName)) continue;
+      const label = ariaLabel(c);
+      if (label) { out.push(label); continue; }
+      if (c.localName === 'img') { out.push(c.getAttribute('alt') || ''); continue; }
+      if (c.localName === 'svg') { const t = c.querySelector('title'); out.push(t ? t.textContent : ''); continue; }
+      out.push(contentText(c, depth + 1));
+    }
+    return out.join(' ');
+  }
+
+  // Hidden from assistive technology: such elements are not in the accessibility
+  // tree, so they are left out of snapshots and role/label lookups.
+  const exposed = (el) => !el.closest('[aria-hidden="true"], [inert]');
 
   function ariaLabel(el) {
     const lb = el.getAttribute('aria-labelledby');
@@ -184,13 +225,13 @@
         const want = loc.role;
         found = allElements().filter((el) => {
           const r = role(el);
-          if (!r || (want === '*' ? GENERIC.has(r) : r !== want)) return false;
+          if (!r || (want === '*' ? GENERIC.has(r) : r !== want) || !exposed(el)) return false;
           return loc.name == null || matches(name(el), loc.name, !!loc.exact);
         });
         break;
       }
       case 'label':
-        found = allElements().filter((el) => LABELABLE.has(role(el)) && matches(labelText(el), loc.text, !!loc.exact));
+        found = allElements().filter((el) => LABELABLE.has(role(el)) && exposed(el) && matches(labelText(el), loc.text, !!loc.exact));
         break;
       case 'test_id':
         found = allElements().filter((el) => testId(el) === loc.id);
@@ -248,6 +289,45 @@
     return '<' + el.localName + (el.id ? '#' + el.id : '') + '>' + (n ? ' "' + n.slice(0, 40) + '"' : '');
   }
 
+  // Click effect detection: what observably changed after a click. Style-only
+  // attribute churn (animations) is ignored; focus moving to a clicked button
+  // is not an effect.
+  let armed = null;
+  const stateOf = (el) => JSON.stringify([el.isConnected, el.checked, el.value, el.open,
+    ...['aria-expanded', 'aria-pressed', 'aria-selected', 'aria-checked'].map((a) => el.getAttribute(a))]);
+  function arm(el) {
+    if (armed) armed.obs.disconnect();
+    const rec = { dom: 0 };
+    const obs = new MutationObserver((ms) => {
+      for (const m of ms) {
+        if (m.type === 'childList') rec.dom += [...m.addedNodes, ...m.removedNodes].filter((n) => n.nodeType === 1).length;
+        else if (m.type === 'attributes' && m.attributeName !== 'style') rec.dom++;
+      }
+    });
+    obs.observe(document, { subtree: true, childList: true, attributes: true });
+    armed = { el, state: stateOf(el), url: location.href, rec, obs };
+  }
+  async function clickEffect(maxMs) {
+    const a = armed;
+    if (!a) return null;
+    const kinds = () => {
+      const k = [];
+      if (location.href !== a.url) k.push('url_changed');
+      if (stateOf(a.el) !== a.state) k.push('state_changed');
+      if (a.rec.dom) k.push('dom_changed');
+      return k;
+    };
+    const t0 = performance.now();
+    let k = kinds();
+    while (!k.length && performance.now() - t0 < maxMs) {
+      await new Promise((res) => setTimeout(res, 15));
+      k = kinds();
+    }
+    a.obs.disconnect();
+    armed = null;
+    return k;
+  }
+
   async function prepareClick(r) {
     const el = get(r);
     checkActionable(el);
@@ -270,6 +350,7 @@
     const y = b.y + b.height / 2;
     const hit = deepHit(x, y);
     if (!receives(el, hit)) fail('not_actionable', r + ' is covered by ' + describeBrief(hit));
+    arm(el);
     return { x, y };
   }
 
@@ -340,12 +421,57 @@
     return Array.from(el.selectedOptions).map((x) => x.value);
   }
 
-  function snapshot(mode, max) {
+  // Client-rendered apps can still be an empty shell when `load` fires. Only then,
+  // wait for content to appear and the DOM to go quiet for 50 ms, up to maxMs.
+  // Only rendered content counts: apps often inject hidden sprites, pixels or
+  // links before they render anything a user could see.
+  function looksEmpty() {
+    const b = document.body;
+    if (!b) return true;
+    if (norm(b.innerText)) return false;
+    for (const el of b.querySelectorAll('input, button, select, textarea, a[href], img, svg, canvas, video, iframe')) {
+      if (visible(el)) return false;
+    }
+    return true;
+  }
+
+  // A page is settled when it shows something and its scripts have stopped
+  // adding or removing elements for QUIET_MS. Static pages are settled at load
+  // and pay nothing; client-rendered apps (including splash screens that are
+  // replaced) are waited for, up to maxEmptyMs while empty and BUSY_CAP_MS
+  // while visible content keeps changing (tickers, feeds).
+  const QUIET_MS = 150;
+  const BUSY_CAP_MS = 1500;
+  const busy = () => lastScriptChange > 0 && performance.now() - lastScriptChange < QUIET_MS;
+
+  async function settle(maxEmptyMs) {
+    if (!maxEmptyMs || (!looksEmpty() && !busy())) return {};
+    const started = performance.now();
+    for (;;) {
+      await new Promise((res) => setTimeout(res, 16));
+      const empty = looksEmpty();
+      const elapsed = performance.now() - started;
+      if (!empty && !busy()) return { rendered_after_load_ms: Math.round(elapsed) };
+      if (elapsed >= (empty ? maxEmptyMs : BUSY_CAP_MS)) {
+        return { rendered_after_load_ms: Math.round(elapsed), still_empty: empty, still_changing: !empty };
+      }
+    }
+  }
+
+  // Snapshots never describe a page mid-render: an empty page, or one whose
+  // scripts just changed it, is given time to settle first. Settled pages pay nothing.
+  async function snapshot(mode, max, maxEmptyMs) {
+    const settled = await settle(maxEmptyMs);
+    return { ...snapshotNow(mode, max), ...settled };
+  }
+
+  function snapshotNow(mode, max) {
     const all = allElements();
     const headings = [];
     const picked = [];
     const messages = [];
     for (const el of all) {
+      if (!exposed(el)) continue;
       const r = role(el);
       if (r === 'heading' && headings.length < 40 && visible(el)) {
         const m = /^h([1-6])$/.exec(el.localName);
@@ -397,10 +523,13 @@
     snapshot,
     pageState: () => ({ url: location.href, title: document.title }),
     // Resolves with the page state once the window load event has fired.
-    loaded: () => new Promise((res) => {
-      const done = () => res({ url: location.href, title: document.title });
-      if (document.readyState === 'complete') done();
-      else addEventListener('load', done, { once: true });
+    loaded: (maxRenderMs) => new Promise((res) => {
+      const done = (extra) => res({ url: location.href, title: document.title, ...extra });
+      const afterLoad = () => settle(maxRenderMs).then(done);
+      if (document.readyState === 'complete') afterLoad();
+      else addEventListener('load', afterLoad, { once: true });
     }),
+    settle: (maxRenderMs) => settle(maxRenderMs),
+    clickEffect,
   };
 })();

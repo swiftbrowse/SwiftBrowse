@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><title>Real-world patterns</title>
+<style>.far { margin-top: 4000px; content-visibility: auto; contain-intrinsic-size: 400px; }</style></head>
+<body>
+<!-- News ticker: second copy is decorative and hidden from assistive tech -->
+<div class="ticker"><a href="#mcp">Connect an AI tool</a></div>
+<div class="ticker" aria-hidden="true"><a href="#mcp" tabindex="-1">Connect an AI tool</a></div>
+<!-- Logo link named only by an SVG's aria-label -->
+<a href="https://example.com/partner"><svg role="img" aria-label="Partner Co" width="40" height="10"><rect width="40" height="10"/></svg></a>
+<a href="https://example.com/img"><img alt="Image Partner" width="20" height="10" src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></a>
+<!-- Off-screen section skipped by content-visibility: innerText is empty here -->
+<section class="far"><h2>Pricing that scales</h2><a href="#solo"><span>$10</span><span>/mo Solo plan</span></a></section>
+</body></html>

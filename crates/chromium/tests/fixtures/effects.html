@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><title>Effects</title></head>
+<body>
+<button>Dead button</button>
+<button aria-expanded="false" onclick="this.setAttribute('aria-expanded', this.getAttribute('aria-expanded') !== 'true')">Toggle</button>
+<button onclick="const m = document.createElement('ul'); m.innerHTML = '<li><a href=#x>Menu item</a></li>'; document.body.append(m)">Open menu</button>
+<a href="/form">Go to form</a>
+<div id="anim" style="width:10px;height:10px"></div>
+<script>
+  // Constant style churn, like scroll/parallax animations: not a click effect.
+  let t = 0; setInterval(() => { document.getElementById('anim').style.opacity = String((t++ % 10) / 10); }, 10);
+</script>
+</body></html>

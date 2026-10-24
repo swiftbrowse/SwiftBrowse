@@ -1,0 +1,115 @@
+{
+  "name": "the3rdacademy.com read-only agent tasks",
+  "stop_on_failure": false,
+  "steps": [
+    {
+      "op": "navigate",
+      "url": "https://the3rdacademy.com",
+      "timeout_ms": 30000
+    },
+    {
+      "op": "assert_page_state",
+      "name": "home rendered",
+      "conditions": [
+        {
+          "type": "visible",
+          "target": {
+            "by": "role",
+            "role": "heading",
+            "name": "Beyond Credentials. Behavioral Readiness.",
+            "exact": true
+          }
+        },
+        {
+          "type": "visible",
+          "target": {
+            "by": "role",
+            "role": "status",
+            "name": "Live: public reading is open now",
+            "exact": true
+          }
+        }
+      ]
+    },
+    {
+      "op": "click",
+      "target": {
+        "by": "role",
+        "role": "link",
+        "name": "Platform",
+        "exact": true
+      },
+      "expect": {
+        "type": "url_contains",
+        "value": "/platform"
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "op": "get_page_snapshot"
+    },
+    {
+      "op": "click",
+      "target": {
+        "by": "role",
+        "role": "link",
+        "name": "Employers",
+        "exact": true
+      },
+      "expect": {
+        "type": "url_contains",
+        "value": "/employers"
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "op": "get_page_snapshot"
+    },
+    {
+      "op": "click",
+      "target": {
+        "by": "auto",
+        "query": "Schools or Institutions"
+      },
+      "expect": {
+        "type": "url_contains",
+        "value": "/schools"
+      },
+      "timeout_ms": 30000
+    },
+    {
+      "op": "navigate",
+      "url": "https://the3rdacademy.com/about",
+      "timeout_ms": 30000
+    },
+    {
+      "op": "get_page_snapshot"
+    },
+    {
+      "op": "navigate",
+      "url": "https://the3rdacademy.com/help",
+      "timeout_ms": 30000
+    },
+    {
+      "op": "get_page_snapshot"
+    },
+    {
+      "op": "navigate",
+      "url": "https://the3rdacademy.com/get-started",
+      "timeout_ms": 30000
+    },
+    {
+      "op": "get_page_snapshot"
+    },
+    {
+      "op": "get_screenshot",
+      "name": "the3rdacademy-get-started"
+    },
+    {
+      "op": "get_console_errors"
+    },
+    {
+      "op": "get_network_failures"
+    }
+  ]
+}

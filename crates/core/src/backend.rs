@@ -69,6 +69,12 @@ pub trait Backend: Send {
     async fn dialogs(&mut self) -> Result<Vec<DialogEvent>> {
         Ok(Vec::new())
     }
+    /// What observably changed after the last click (`navigated`, `url_changed`,
+    /// `state_changed`, `dom_changed`), waiting up to `max` for the first change.
+    /// An empty list means nothing changed; `None` means the backend can't tell.
+    async fn click_effect(&mut self, _max: Duration) -> Result<Option<Vec<String>>> {
+        Ok(None)
+    }
 
     async fn close(&mut self) -> Result<()>;
 }

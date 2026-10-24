@@ -66,6 +66,9 @@ pub struct Session {
 
 /// Condition-based polling: checks immediately, then backs off up to 100 ms
 /// between checks until the deadline. Never sleeps past the deadline.
+/// How long a click without `expect` waits to observe any effect.
+const CLICK_EFFECT_WAIT_MS: u64 = 150;
+
 struct Poll {
     deadline: Instant,
     attempt: usize,
@@ -223,6 +226,19 @@ impl Session {
                 if let Some(status) = nav.status.filter(|s| *s >= 400) {
                     ctx.notes.push(format!("page loaded with HTTP status {status}"));
                 }
+                if nav.still_empty {
+                    ctx.notes.push(format!(
+                        "page still looks empty {} ms after load; it may need wait_for or wait_until=network_idle",
+                        nav.rendered_after_load_ms.unwrap_or_default()
+                    ));
+                } else if nav.still_changing {
+                    ctx.notes.push(format!(
+                        "page was still changing {} ms after load; snapshot again before relying on it",
+                        nav.rendered_after_load_ms.unwrap_or_default()
+                    ));
+                } else if let Some(ms) = nav.rendered_after_load_ms {
+                    ctx.notes.push(format!("page rendered client-side {ms} ms after load; waited for it"));
+                }
                 Ok(Some(serde_json::to_value(nav).unwrap_or_default()))
             }
             Request::GetPageSnapshot(a) => {
@@ -232,6 +248,16 @@ impl Session {
                 };
                 let max = a.max_elements.unwrap_or(cap).min(cap);
                 let snap = self.backend.snapshot(a.mode, max).await?;
+                if snap.still_empty {
+                    ctx.notes.push(format!(
+                        "page still looks empty after waiting {} ms for it to render",
+                        snap.rendered_after_load_ms.unwrap_or_default()
+                    ));
+                } else if snap.still_changing {
+                    ctx.notes.push("page kept changing while snapshotting; snapshot again before relying on it".into());
+                } else if let Some(ms) = snap.rendered_after_load_ms {
+                    ctx.notes.push(format!("page was still rendering; waited {ms} ms before snapshotting"));
+                }
                 if snap.truncated {
                     ctx.notes.push(format!(
                         "snapshot truncated to {} of {} elements; use find_element or a full snapshot for more",
@@ -292,6 +318,26 @@ impl Session {
                 let mut poll = Poll::new(timeout);
                 let act = Act::Click { approved: a.approved, consequential: a.consequential };
                 self.act(&a.target, act, &mut poll, ctx).await?;
+                if a.expect.is_none() {
+                    // No expected outcome: at least tell the agent whether anything happened.
+                    let effect =
+                        self.backend.click_effect(Duration::from_millis(CLICK_EFFECT_WAIT_MS)).await.ok().flatten();
+                    self.verify_expect(None, &mut poll, ctx, "click").await?;
+                    if let (Some(kinds), Some(v)) = (&effect, ctx.verification.as_mut()) {
+                        v.note = Some(if kinds.is_empty() {
+                            format!(
+                                "click was dispatched but nothing observable changed within {CLICK_EFFECT_WAIT_MS} ms; \
+                                 the page may not be interactive yet. Re-check before acting on it"
+                            )
+                        } else {
+                            format!(
+                                "click was dispatched; observed: {}. Pass `expect` to confirm the intended outcome",
+                                kinds.join(", ")
+                            )
+                        });
+                    }
+                    return Ok(effect.map(|k| json!({ "effect": k })));
+                }
                 self.verify_expect(a.expect.as_ref(), &mut poll, ctx, "click").await?;
                 Ok(None)
             }

@@ -1,7 +1,7 @@
 # Agent tasks: SwiftBrowse MCP vs Playwright MCP
 
-- **date**: 2026-10-23T23:37:56.280Z
-- **cpu**: Intel(R) Xeon(R) Processor @ 2.10GHz x4
+- **date**: 2026-10-24T04:42:09.570Z
+- **cpu**: Intel(R) Xeon(R) Processor @ 2.80GHz x4
 - **chromium**: Google Chrome for Testing 153.0.8010.12
 - **swiftbrowse**: swiftbrowse 0.1.0
 - **playwright_mcp**: 0.0.83
@@ -12,15 +12,15 @@ Both servers are driven over MCP stdio as an agent would. formTask and largeTask
 
 | task | contender | success | p50 ms | p95 ms | tool calls | context bytes |
 |---|---|---:|---:|---:|---:|---:|
-| formTask | SwiftBrowse MCP | 15/15 | 353.3 | 369 | 7 | 1002 |
-| formTask | Playwright MCP 0.0.83 (defaults) | 15/15 | 1285.1 | 1299.5 | 8 | 2268 |
-| formTask | Playwright MCP 0.0.83 (--timeout-settle 0) | 15/15 | 469.2 | 566.7 | 8 | 2265 |
-| largeTask | SwiftBrowse MCP | 15/15 | 135.3 | 178.6 | 3 | 6588 |
-| largeTask | Playwright MCP 0.0.83 (defaults) | 15/15 | 1383.8 | 1421.6 | 4 | 152550 |
-| largeTask | Playwright MCP 0.0.83 (--timeout-settle 0) | 15/15 | 868 | 1015.3 | 4 | 152550 |
-| largeDirect | SwiftBrowse MCP | 15/15 | 117.2 | 221.2 | 2 | 199 |
-| largeDirect | Playwright MCP 0.0.83 (defaults) | 15/15 | 1262.8 | 1355.5 | 3 | 755 |
-| largeDirect | Playwright MCP 0.0.83 (--timeout-settle 0) | 15/15 | 745.8 | 835.7 | 3 | 755 |
-| cold_start | SwiftBrowse MCP | - | 378 | 393.2 | - | - |
-| cold_start | Playwright MCP 0.0.83 (defaults) | - | 833.7 | 921.2 | - | - |
-| cold_start | Playwright MCP 0.0.83 (--timeout-settle 0) | - | 826.6 | 895.9 | - | - |
+| formTask | SwiftBrowse MCP | 15/15 | 349.6 | 372.6 | 7 | 1058 |
+| formTask | Playwright MCP 0.0.83 (defaults) | 15/15 | 1247.9 | 1284.2 | 8 | 2268 |
+| formTask | Playwright MCP 0.0.83 (--timeout-settle 0) | 15/15 | 482.1 | 531.6 | 8 | 2265 |
+| largeTask | SwiftBrowse MCP | 15/15 | 168 | 278.8 | 3 | 6588 |
+| largeTask | Playwright MCP 0.0.83 (defaults) | 15/15 | 1469.2 | 1562.4 | 4 | 152550 |
+| largeTask | Playwright MCP 0.0.83 (--timeout-settle 0) | 15/15 | 1039.1 | 1088.7 | 4 | 152550 |
+| largeDirect | SwiftBrowse MCP | 15/15 | 140.3 | 274 | 2 | 199 |
+| largeDirect | Playwright MCP 0.0.83 (defaults) | 15/15 | 1333.8 | 1378.3 | 3 | 755 |
+| largeDirect | Playwright MCP 0.0.83 (--timeout-settle 0) | 15/15 | 962 | 1033 | 3 | 755 |
+| cold_start | SwiftBrowse MCP | - | 419.4 | 452.7 | - | - |
+| cold_start | Playwright MCP 0.0.83 (defaults) | - | 968.1 | 1023.6 | - | - |
+| cold_start | Playwright MCP 0.0.83 (--timeout-settle 0) | - | 931.8 | 1013.1 | - | - |

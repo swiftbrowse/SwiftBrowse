@@ -83,6 +83,25 @@ Why it wins, and the caveats:
 
 Run it: `cd bench && npm install && node agents.mjs ../target/release/swiftbrowse --iter 15 --cold 10`.
 
+## Tested on live sites
+
+`examples/live/` holds read-only agent task scripts for [pipilot.dev](https://pipilot.dev) and [the3rdacademy.com](https://the3rdacademy.com): navigate, assert, snapshot, open menus, follow links, type without submitting, check diagnostics. Run them with navigation restricted to those hosts:
+
+```sh
+swiftbrowse run examples/live/pipilot.json --allow-host pipilot.dev --allow-host '*.pipilot.dev'
+```
+
+Both pass every step (2 runs each, 0 console errors, 0 network failures, 0 leaked browsers). Running them exposed real-site behaviour the fixtures didn't have; each case now has a regression test in `crates/chromium/tests/`:
+
+| seen on a live site | what SwiftBrowse does now |
+|---|---|
+| Page is blank at `load` and renders client-side | navigate waits for content (bounded) and says so in a note |
+| App tears down its DOM after `load` and re-renders in stages | snapshots wait until scripts stop adding or removing elements for 150 ms; settled pages pay nothing |
+| Link named only by a child `<svg role="img" aria-label>` or `<img alt>` | names are computed from content like the accessible-name algorithm |
+| Off-screen sections with `content-visibility: auto` (empty `innerText`) | names and text fall back to the DOM |
+| Decorative duplicates under `aria-hidden="true"` (news tickers) | excluded from snapshots and role/label lookups |
+| A click lands before the app has attached its handlers | a click without `expect` reports what changed (`navigated`, `url_changed`, `state_changed`, `dom_changed`), or that nothing did |
+
 ## Benchmark vs the Playwright library
 
 `bench/bench.mjs` runs identical tasks with Playwright 1.64.0 (library API) and SwiftBrowse (through MCP over stdio). Both use the same Chromium binary, local pages and viewport, with warm-ups discarded. Its header lists the fairness rules; keep them when changing it.

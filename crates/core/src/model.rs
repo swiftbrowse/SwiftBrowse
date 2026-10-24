@@ -134,6 +134,13 @@ pub struct PageSnapshot {
     pub messages: Vec<Message>,
     pub total_elements: usize,
     pub truncated: bool,
+    /// Set when the page was still rendering and the snapshot waited for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_after_load_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub still_empty: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub still_changing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -240,6 +247,16 @@ pub struct NavigationInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
     pub same_document: bool,
+    /// Set when the page was still an empty shell at `load` and SwiftBrowse
+    /// waited for client-side rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_after_load_ms: Option<u64>,
+    /// The page still looked empty when the render wait ended.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub still_empty: bool,
+    /// Visible content was still being added or removed when the wait ended.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub still_changing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -30,6 +30,10 @@ fn serve() -> String {
                 let (status, body) = match path {
                     "/form" => ("200 OK", include_str!("fixtures/form.html")),
                     "/tricky" => ("200 OK", include_str!("fixtures/tricky.html")),
+                    "/realworld" => ("200 OK", include_str!("fixtures/realworld.html")),
+                    "/spa" => ("200 OK", include_str!("fixtures/spa.html")),
+                    "/effects" => ("200 OK", include_str!("fixtures/effects.html")),
+                    "/remount" => ("200 OK", include_str!("fixtures/remount.html")),
                     "/onload" => ("200 OK", "<title>before</title><script>addEventListener('load', () => document.title = 'after load')</script>"),
                     _ => ("404 Not Found", "not found"),
                 };
@@ -298,4 +302,78 @@ async fn navigation_errors_and_policy() {
     let caps = h.ok("get_capabilities", json!({})).await.data.unwrap();
     assert!(caps["engine_version"].as_str().unwrap().contains("Chrome"));
     h.mgr.close_all().await;
+}
+
+/// Patterns found on live sites (pipilot.dev): client-side rendering after load,
+/// labels on child SVG/IMG, content-visibility, aria-hidden duplicates.
+#[tokio::test(flavor = "multi_thread")]
+async fn real_world_page_patterns() {
+    let Some(mut h) = harness().await else { return };
+
+    let nav = h.open("/spa").await;
+    assert!(nav.notes.iter().any(|n| n.contains("rendered client-side")), "{:?}", nav.notes);
+    let snap = h.ok("get_page_snapshot", json!({})).await.data.unwrap();
+    let text = snap["text"].as_str().unwrap();
+    assert!(text.contains("h1 Dashboard") && text.contains("button \"Build\""), "{text}");
+
+    // An app that tears down its prerendered DOM after load and re-renders in
+    // stages: the snapshot waits for the final page instead of a blank gap.
+    for _ in 0..3 {
+        h.open("/remount").await;
+        let r = h.ok("get_page_snapshot", json!({})).await;
+        let text = r.data.unwrap()["text"].as_str().unwrap().to_string();
+        assert!(text.contains("h1 Client rendered") && text.contains("button \"Continue\""), "{text}");
+    }
+
+    // Pages that already have content don't wait.
+    let nav = h.open("/form").await;
+    assert!(nav.notes.is_empty(), "{:?}", nav.notes);
+
+    h.open("/realworld").await;
+    let snap = h.ok("get_page_snapshot", json!({ "format": "json", "mode": "full" })).await.data.unwrap();
+    let names: Vec<String> = snap["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["role"] == "link")
+        .map(|e| e["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(names.iter().filter(|n| *n == "Connect an AI tool").count(), 1, "aria-hidden copy excluded: {names:?}");
+    assert!(names.contains(&"Partner Co".to_string()), "{names:?}");
+    assert!(names.contains(&"Image Partner".to_string()), "{names:?}");
+    assert!(names.iter().any(|n| n.contains("$10") && n.contains("Solo plan")), "content-visibility text: {names:?}");
+    let headings: Vec<&str> =
+        snap["headings"].as_array().unwrap().iter().map(|h| h["text"].as_str().unwrap()).collect();
+    assert!(headings.contains(&"Pricing that scales"), "{headings:?}");
+
+    // The off-screen link can be found and clicked by its content name.
+    h.ok(
+        "click",
+        json!({ "target": { "by": "role", "role": "link", "name": "Solo plan" },
+        "expect": { "type": "url_contains", "value": "#solo" } }),
+    )
+    .await;
+}
+
+/// A click without `expect` reports what observably changed, so a click on a
+/// not-yet-interactive page doesn't read as a success.
+#[tokio::test(flavor = "multi_thread")]
+async fn click_effects_are_reported() {
+    let Some(mut h) = harness().await else { return };
+    h.open("/effects").await;
+    let effect = |r: &ActionResult| r.data.as_ref().map(|d| d["effect"].clone()).unwrap_or_default();
+
+    let r = h.ok("click", json!({ "target": { "by": "auto", "query": "Dead button" } })).await;
+    assert_eq!(effect(&r), json!([]), "style churn must not count");
+    assert!(r.verification.unwrap().note.unwrap().contains("nothing observable changed"));
+
+    let r = h.ok("click", json!({ "target": { "by": "auto", "query": "Toggle" } })).await;
+    assert!(effect(&r).as_array().unwrap().contains(&json!("state_changed")), "{:?}", effect(&r));
+
+    let r = h.ok("click", json!({ "target": { "by": "auto", "query": "Open menu" } })).await;
+    assert!(effect(&r).as_array().unwrap().contains(&json!("dom_changed")), "{:?}", effect(&r));
+
+    let r = h.ok("click", json!({ "target": { "by": "auto", "query": "Go to form" } })).await;
+    let e = effect(&r);
+    assert!(e == json!(["navigated"]) || e.as_array().unwrap().contains(&json!("url_changed")), "{e:?}");
 }

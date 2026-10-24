@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><title>Remount</title></head>
+<body><div id="root"><nav><a href="#a">Home</a></nav><h1>Prerendered</h1></div>
+<script>
+  // After load, the client app throws the prerendered DOM away and renders in
+  // stages with gaps longer than a frame (header, then main content).
+  // (As observed on a live site: the teardown has happened by the time an agent looks.)
+  addEventListener('load', () => {
+    const root = document.getElementById('root');
+    root.innerHTML = '';
+    setTimeout(() => { root.innerHTML = '<nav><a href="#a">Home</a></nav>'; }, 80);
+    setTimeout(() => { root.insertAdjacentHTML('beforeend', '<main><h1>Client rendered</h1><button>Continue</button></main>'); }, 200);
+  });
+</script></body></html>

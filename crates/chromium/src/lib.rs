@@ -27,6 +27,23 @@ const HELPER: &str = include_str!("helper.js");
 const CMD_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BUFFER: usize = 200;
 const WORLD: &str = "swiftbrowse";
+/// Longest wait for a client-rendered page that is still empty at `load`.
+const RENDER_WAIT: Duration = Duration::from_secs(5);
+
+/// What the page reports when navigation completes in the page.
+#[derive(Default, serde::Deserialize)]
+struct Loaded {
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    rendered_after_load_ms: Option<u64>,
+    #[serde(default)]
+    still_empty: bool,
+    #[serde(default)]
+    still_changing: bool,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ChromiumFactory {
@@ -72,6 +89,8 @@ struct State {
     lifecycle: HashSet<(String, String)>,
     doc_status: HashMap<String, u16>,
     requests: HashMap<String, (String, String)>,
+    /// In-flight scripts and data requests: what a client-rendered page still needs before it can render.
+    inflight: HashMap<String, String>,
     console: VecDeque<ConsoleEntry>,
     network: VecDeque<NetworkFailure>,
     dialogs: VecDeque<DialogEvent>,
@@ -87,6 +106,8 @@ pub struct ChromiumBackend {
     profile: Option<tempfile::TempDir>,
     pump: tokio::task::JoinHandle<()>,
     version: Option<String>,
+    /// Document generation when the last click was dispatched.
+    worlds_at_click: u64,
     headless: bool,
     no_sandbox: bool,
 }
@@ -176,6 +197,7 @@ impl ChromiumBackend {
             profile: Some(launched.profile),
             pump,
             version,
+            worlds_at_click: 0,
             headless: options.headless,
             no_sandbox,
         })
@@ -257,7 +279,7 @@ impl ChromiumBackend {
 
     /// Waits for the new document's isolated world, then for its load event in the page.
     /// `Ok(None)` means the fast path could not be used and the caller should fall back.
-    async fn load_in_page(&mut self, worlds_before: u64, deadline: tokio::time::Instant) -> Result<Option<PageState>> {
+    async fn load_in_page(&mut self, worlds_before: u64, deadline: tokio::time::Instant) -> Result<Option<Loaded>> {
         loop {
             self.lifecycle.borrow_and_update();
             {
@@ -272,8 +294,19 @@ impl ChromiumBackend {
                 Err(_) => return Ok(None),
             }
         }
-        match tokio::time::timeout_at(deadline, self.call("loaded", json!([]))).await {
-            Ok(Ok(v)) => Ok(serde_json::from_value(v).ok()),
+        let render_ms =
+            RENDER_WAIT.min(deadline.saturating_duration_since(tokio::time::Instant::now())).as_millis() as u64;
+        match tokio::time::timeout_at(deadline, self.call("loaded", json!([render_ms]))).await {
+            Ok(Ok(v)) => {
+                if std::env::var_os("SWIFTBROWSE_TRACE").is_some() {
+                    let st = self.state.lock().unwrap();
+                    eprintln!(
+                        "[swiftbrowse] in-page load result: {v}; in flight: {:?}",
+                        st.inflight.values().collect::<Vec<_>>()
+                    );
+                }
+                Ok(serde_json::from_value(v).ok())
+            }
             // Context replaced mid-load (redirect, reload) or slow page: use the lifecycle path.
             Ok(Err(_)) | Err(_) => Ok(None),
         }
@@ -388,6 +421,9 @@ async fn pump_events(
                     st.helper_in = id;
                     st.worlds_created += 1;
                     lifecycle.send_modify(|n| *n += 1);
+                    if std::env::var_os("SWIFTBROWSE_TRACE").is_some() {
+                        eprintln!("[swiftbrowse] new document in main frame (world #{})", st.worlds_created);
+                    }
                 }
             }
             "Runtime.executionContextDestroyed" => {
@@ -444,6 +480,12 @@ async fn pump_events(
                     st.requests.clear();
                 }
                 st.requests.insert(s(p, "requestId"), (s(&p["request"], "url"), s(&p["request"], "method")));
+                if matches!(s(p, "type").as_str(), "Script" | "Fetch" | "XHR") {
+                    if st.inflight.len() > 1_000 {
+                        st.inflight.clear();
+                    }
+                    st.inflight.insert(s(p, "requestId"), s(&p["request"], "url"));
+                }
             }
             "Network.responseReceived" => {
                 let status = p["response"]["status"].as_u64().unwrap_or(0) as u16;
@@ -468,8 +510,10 @@ async fn pump_events(
             }
             "Network.loadingFinished" => {
                 st.requests.remove(&s(p, "requestId"));
+                st.inflight.remove(&s(p, "requestId"));
             }
             "Network.loadingFailed" => {
+                st.inflight.remove(&s(p, "requestId"));
                 let req = st.requests.remove(&s(p, "requestId"));
                 if !p["canceled"].as_bool().unwrap_or(false) {
                     let (url, method) = req.unwrap_or_default();
@@ -570,7 +614,15 @@ impl Backend for ChromiumBackend {
             if let Some(page) = self.load_in_page(worlds_before, deadline).await? {
                 trace(started, "loaded (in-page)");
                 let status = self.state.lock().unwrap().doc_status.get(&loader).copied();
-                return Ok(NavigationInfo { url: page.url, title: page.title, status, same_document });
+                return Ok(NavigationInfo {
+                    url: page.url,
+                    title: page.title,
+                    status,
+                    same_document,
+                    rendered_after_load_ms: page.rendered_after_load_ms,
+                    still_empty: page.still_empty,
+                    still_changing: page.still_changing,
+                });
             }
         }
         if !same_document {
@@ -583,11 +635,26 @@ impl Backend for ChromiumBackend {
             trace(started, name);
         }
         let status = self.state.lock().unwrap().doc_status.get(&loader).copied();
+        let mut settled = Loaded::default();
+        if !same_document && wait_until != WaitUntil::NetworkIdle {
+            let render_ms = RENDER_WAIT.min(timeout.saturating_sub(started.elapsed())).as_millis() as u64;
+            if let Ok(v) = self.call("settle", json!([render_ms])).await {
+                settled = serde_json::from_value(v).unwrap_or_default();
+            }
+        }
         // Read from the page: Chromium's pushed target title still holds the URL
         // placeholder when `load` fires, so it cannot be trusted here.
         let page = self.page_state().await?;
         trace(started, "page state read");
-        Ok(NavigationInfo { url: page.url, title: page.title, status, same_document })
+        Ok(NavigationInfo {
+            url: page.url,
+            title: page.title,
+            status,
+            same_document,
+            rendered_after_load_ms: settled.rendered_after_load_ms,
+            still_empty: settled.still_empty,
+            still_changing: settled.still_changing,
+        })
     }
 
     async fn page_state(&mut self) -> Result<PageState> {
@@ -597,7 +664,7 @@ impl Backend for ChromiumBackend {
 
     async fn snapshot(&mut self, mode: SnapshotMode, max_elements: usize) -> Result<PageSnapshot> {
         let mode = if mode == SnapshotMode::Full { "full" } else { "compact" };
-        let v = self.call("snapshot", json!([mode, max_elements])).await?;
+        let v = self.call("snapshot", json!([mode, max_elements, RENDER_WAIT.as_millis() as u64])).await?;
         let mut snap: PageSnapshot = serde_json::from_value(v).map_err(|e| CoreError::backend(e.to_string()))?;
         let mut st = self.state.lock().unwrap();
         let from = st.dialogs_reported.min(st.dialogs.len());
@@ -632,17 +699,19 @@ impl Backend for ChromiumBackend {
 
     async fn click(&mut self, ref_id: &str) -> Result<()> {
         let pt = self.call("prepareClick", json!([ref_id])).await?;
+        self.worlds_at_click = self.state.lock().unwrap().worlds_created;
         let (x, y) = (pt["x"].as_f64().unwrap_or(0.0), pt["y"].as_f64().unwrap_or(0.0));
         let dispatch = async {
-            self.send("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y })).await?;
+            self.send("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y, "buttons": 0 }))
+                .await?;
             self.send(
                 "Input.dispatchMouseEvent",
-                json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1 }),
+                json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 }),
             )
             .await?;
             self.send(
                 "Input.dispatchMouseEvent",
-                json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1 }),
+                json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1 }),
             )
             .await
         };
@@ -743,6 +812,21 @@ impl Backend for ChromiumBackend {
         tokio::fs::write(path, bytes)
             .await
             .map_err(|e| CoreError::backend(format!("cannot write {}: {e}", path.display())))
+    }
+
+    async fn click_effect(&mut self, max: Duration) -> Result<Option<Vec<String>>> {
+        let new_document = |me: &Self| me.state.lock().unwrap().worlds_created > me.worlds_at_click;
+        // A document replaced since the click is the strongest possible effect; the
+        // new document's helper knows nothing about the click, so ask the state first.
+        if new_document(self) {
+            return Ok(Some(vec!["navigated".into()]));
+        }
+        match self.call("clickEffect", json!([max.as_millis() as u64])).await {
+            Ok(_) if new_document(self) => Ok(Some(vec!["navigated".into()])),
+            Ok(v) => Ok(serde_json::from_value(v).ok().flatten()),
+            Err(e) if context_gone(&e) || new_document(self) => Ok(Some(vec!["navigated".into()])),
+            Err(e) => Err(e),
+        }
     }
 
     async fn console_errors(&mut self) -> Result<Vec<ConsoleEntry>> {

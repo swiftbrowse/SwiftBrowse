@@ -15,3 +15,11 @@
 
 ## 2026-10-23 · Servers must never leak browsers
 - Found while benchmarking: a SIGTERMed `swiftbrowse mcp` orphaned its Chromium. Fixed with signal-driven shutdown, a Linux parent-death signal on the browser, and a sweep of profiles whose owner process is gone. Guarded by `crates/cli/tests/signals.rs`.
+
+## 2026-10-24 · Real-site correctness over raw speed
+- Live runs on pipilot.dev and the3rdacademy.com showed empty or partial snapshots on client-rendered pages, unnamed elements, duplicate ticker links, and clicks that did nothing before hydration. Fixed with a bounded settle (150 ms script quiet window, only when scripts are changing the DOM), accessible-name fallbacks, aria-hidden exclusion and click-effect reporting.
+- **Cost:** only on pages whose scripts are changing the DOM; benchmarks unchanged within noise. **Reversibility:** two-way door (constants in `helper.js`).
+
+## 2026-10-24 · CEF (Chromium Embedded Framework): not now
+- Considered for the desktop shell. Gives one Chromium everywhere, but ships and patches a full browser per platform (on the order of 100+ MB), against the spec's lightweight goal, and adds nothing to automation, where the pinned Chromium backend already exists.
+- **Revisit when** desktop work starts and system-WebView differences show up in tests; offer it then as an optional engine, not the default.
