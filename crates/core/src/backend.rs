@@ -8,7 +8,7 @@ use crate::capability::CapabilityReport;
 use crate::error::{CoreError, Result};
 use crate::locator::Locator;
 use crate::model::*;
-use crate::request::{SnapshotMode, WaitUntil};
+use crate::request::{RouteArgs, SnapshotMode, WaitUntil};
 
 /// Options a backend receives when a session starts.
 #[derive(Debug, Clone)]
@@ -70,6 +70,22 @@ pub trait Backend: Send {
         Err(CoreError::unsupported("script evaluation is not available on this backend"))
     }
 
+    /// Adds a network route; returns its id.
+    async fn add_route(&mut self, _route: RouteArgs) -> Result<String> {
+        Err(CoreError::unsupported("network mocking is not available on this backend"))
+    }
+    /// Removes one route or all; returns how many were removed.
+    async fn remove_routes(&mut self, _id: Option<&str>) -> Result<usize> {
+        Err(CoreError::unsupported("network mocking is not available on this backend"))
+    }
+    /// Active routes with their hit counts.
+    async fn routes(&mut self) -> Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
+    /// Requests the pages of this session made, oldest first (bounded).
+    async fn requests(&mut self) -> Result<Vec<RequestRecord>> {
+        Err(CoreError::unsupported("request log is not available on this backend"))
+    }
     /// Number of open tabs, without asking the browser.
     fn tab_count(&self) -> usize {
         1

@@ -1,0 +1,66 @@
+{
+  "name": "network mocking",
+  "tests": [
+    {
+      "name": "renders mocked data",
+      "steps": [
+        { "op": "route", "url": "**/api/todos", "json": [{ "title": "Mocked one" }, { "title": "Mocked two" }] },
+        { "op": "navigate", "url": "api.html" },
+        { "op": "expect", "conditions": [
+          { "type": "text_equals", "target": { "by": "role", "role": "status" }, "text": "2 todos" },
+          { "type": "text_visible", "text": "Mocked two" },
+          { "type": "request_seen", "url_contains": "/api/todos", "method": "GET" }
+        ] }
+      ]
+    },
+    {
+      "name": "shows a server error",
+      "steps": [
+        { "op": "route", "url": "**/api/todos", "status": 500, "body": "boom" },
+        { "op": "navigate", "url": "api.html" },
+        { "op": "expect", "condition": { "type": "text_visible", "text": "Could not load todos (HTTP 500)" } }
+      ]
+    },
+    {
+      "name": "shows a network error",
+      "steps": [
+        { "op": "route", "url": "**/api/todos", "action": "abort", "error": "ConnectionRefused" },
+        { "op": "navigate", "url": "api.html" },
+        { "op": "expect", "condition": { "type": "text_visible", "text": "Network error" } }
+      ]
+    },
+    {
+      "name": "shows the loading state",
+      "steps": [
+        { "op": "route", "url": "**/api/todos", "json": [{ "title": "Slow" }] },
+        { "op": "navigate", "url": "api.html" },
+        { "op": "route", "url": "**/api/todos", "json": [{ "title": "Slow" }], "delay_ms": 600 },
+        { "op": "click", "target": "Retry", "expect": { "type": "text_visible", "text": "Loading…" } },
+        { "op": "expect", "condition": { "type": "text_visible", "text": "1 todos" } }
+      ]
+    },
+    {
+      "name": "recovers after one failure",
+      "steps": [
+        { "op": "route", "url": "**/api/todos", "json": [{ "title": "Back again" }] },
+        { "op": "route", "url": "**/api/todos", "status": 503, "times": 1 },
+        { "op": "navigate", "url": "api.html" },
+        { "op": "expect", "condition": { "type": "text_visible", "text": "HTTP 503" } },
+        { "op": "click", "target": "Retry", "expect": { "type": "text_visible", "text": "Back again" } }
+      ]
+    },
+    {
+      "name": "posts a new item",
+      "steps": [
+        { "op": "route", "url": "**/api/todos", "method": "GET", "json": [] },
+        { "op": "route", "url": "**/api/todos", "method": "POST", "status": 201, "json": { "id": 42 } },
+        { "op": "navigate", "url": "api.html" },
+        { "op": "fill", "target": "New remote todo", "value": "Write docs" },
+        { "op": "click", "target": "Save", "expect": { "type": "text_visible", "text": "Saved #42" } },
+        { "op": "expect", "condition": { "type": "request_seen", "url_contains": "/api/todos", "method": "POST" } },
+        { "op": "list_routes" },
+        { "op": "unroute" }
+      ]
+    }
+  ]
+}

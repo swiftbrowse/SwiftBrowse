@@ -157,7 +157,23 @@ struct Shared {
     pages: Mutex<Vec<TargetSeen>>,
     /// Out-of-process iframes: frame (= target) id -> session id.
     iframes: Mutex<HashMap<String, String>>,
+    /// Network routes (mocks), oldest first; the newest match wins.
+    mocks: Mutex<Vec<Mock>>,
+    next_mock: std::sync::atomic::AtomicU64,
+    /// Requests made by every tab of the session, oldest first.
+    requests: Mutex<VecDeque<RequestRecord>>,
+    /// Network request ids answered by a route.
+    mocked: Mutex<HashSet<String>>,
 }
+
+struct Mock {
+    id: String,
+    spec: swiftbrowse_core::request::RouteArgs,
+    url: regex::Regex,
+    hits: u32,
+}
+
+const MAX_REQUESTS: usize = 1_000;
 
 /// One level of the frame the session is working in.
 #[derive(Clone, Debug)]
@@ -543,6 +559,10 @@ impl ChromiumBackend {
         serde_json::from_value(r["result"]["value"].clone()).map_err(|e| CoreError::backend(e.to_string()))
     }
 
+    fn tab_sessions(&self) -> Vec<String> {
+        std::iter::once(&self.tab).chain(&self.others).map(|t| t.session.clone()).collect()
+    }
+
     fn leave_frames(&mut self) {
         self.frame.clear();
         *self.frame_world.lock().unwrap() = None;
@@ -755,15 +775,18 @@ async fn open_tab(
     let (lc_tx, lc_rx) = watch::channel(0u64);
     let (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel();
     shared.routes.lock().unwrap().insert(session.clone(), ev_tx);
-    let pump = tokio::spawn(pump_events(ev_rx, cdp.clone(), session.clone(), state.clone(), lc_tx));
+    let pump = tokio::spawn(pump_events(ev_rx, cdp.clone(), session.clone(), state.clone(), lc_tx, shared.clone()));
 
     let sid = Some(session.as_str());
-    let setup = match prepared {
+    let mut setup = match prepared {
         None => session_setup(viewport),
         // Already done by the daemon with the default viewport.
         Some(_) if viewport == SessionOptions::default().viewport => Vec::new(),
         Some(_) => session_setup(viewport).into_iter().filter(|(m, _)| m.starts_with("Emulation.")).collect(),
     };
+    if !shared.mocks.lock().unwrap().is_empty() {
+        setup.push(("Fetch.enable", fetch_patterns()));
+    }
     // Sent together, confirmed together. (Not waiting for these replies before
     // the first navigation was measured: no faster, and early network events
     // could be missed.)
@@ -835,12 +858,89 @@ async fn route_events(mut events: tokio::sync::mpsc::UnboundedReceiver<Event>, s
     }
 }
 
+fn fetch_patterns() -> Value {
+    json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }] })
+}
+
+/// Answers an intercepted request from the newest matching route, or lets it through.
+fn answer_paused(p: &Value, cdp: &Cdp, session: &str, shared: &Shared) {
+    let request_id = s(p, "requestId");
+    let url = s(&p["request"], "url");
+    let method = s(&p["request"], "method");
+    let spec = {
+        let mut mocks = shared.mocks.lock().unwrap();
+        let hit = mocks.iter().rposition(|m| {
+            m.url.is_match(&url) && m.spec.method.as_deref().is_none_or(|x| x.eq_ignore_ascii_case(&method))
+        });
+        hit.map(|i| {
+            mocks[i].hits += 1;
+            let spec = mocks[i].spec.clone();
+            if spec.times.is_some_and(|t| mocks[i].hits >= t) {
+                mocks.remove(i);
+            }
+            spec
+        })
+    };
+    use swiftbrowse_core::request::RouteAction;
+    if spec.as_ref().is_some_and(|s| s.action != RouteAction::Continue) {
+        if let Some(net) = p.get("networkId").and_then(Value::as_str) {
+            shared.mocked.lock().unwrap().insert(net.to_string());
+            if let Some(r) = shared.requests.lock().unwrap().iter_mut().rev().find(|r| r.request_id == net) {
+                r.mocked = true;
+            }
+        }
+    }
+    let (cdp, session) = (cdp.clone(), session.to_string());
+    tokio::spawn(async move {
+        let (method, params) = match spec {
+            None => ("Fetch.continueRequest", json!({ "requestId": request_id })),
+            Some(spec) => {
+                if let Some(ms) = spec.delay_ms {
+                    tokio::time::sleep(Duration::from_millis(ms.min(60_000))).await;
+                }
+                match spec.action {
+                    RouteAction::Continue => ("Fetch.continueRequest", json!({ "requestId": request_id })),
+                    RouteAction::Abort => (
+                        "Fetch.failRequest",
+                        json!({ "requestId": request_id, "errorReason": spec.error.as_deref().unwrap_or("Failed") }),
+                    ),
+                    RouteAction::Fulfill => {
+                        let mut headers: Vec<Value> =
+                            spec.headers.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect();
+                        let has = |h: &[Value], n: &str| h.iter().any(|x| s(x, "name").eq_ignore_ascii_case(n));
+                        let body = match (&spec.json, &spec.body) {
+                            (Some(j), _) => {
+                                if !has(&headers, "content-type") {
+                                    headers.push(json!({ "name": "content-type", "value": "application/json" }));
+                                }
+                                j.to_string()
+                            }
+                            (None, Some(b)) => b.clone(),
+                            (None, None) => String::new(),
+                        };
+                        if !has(&headers, "content-type") {
+                            headers.push(json!({ "name": "content-type", "value": "text/plain; charset=utf-8" }));
+                        }
+                        let body = base64::engine::general_purpose::STANDARD.encode(body);
+                        (
+                            "Fetch.fulfillRequest",
+                            json!({ "requestId": request_id, "responseCode": spec.status.unwrap_or(200), "responseHeaders": headers, "body": body }),
+                        )
+                    }
+                }
+            }
+        };
+        let _ = cdp.send(method, params, Some(&session), CMD_TIMEOUT).await;
+    });
+}
+
 async fn pump_events(
     mut events: tokio::sync::mpsc::UnboundedReceiver<Event>,
     cdp: Cdp,
     session: String,
     state: Arc<Mutex<State>>,
     lifecycle: watch::Sender<u64>,
+    shared: Arc<Shared>,
 ) {
     while let Some(ev) = events.recv().await {
         if ev.session_id.as_deref() != Some(session.as_str()) {
@@ -936,7 +1036,23 @@ async fn pump_events(
                     );
                 }
             }
+            "Fetch.requestPaused" => answer_paused(p, &cdp, &session, &shared),
             "Network.requestWillBeSent" => {
+                let request_id = s(p, "requestId");
+                let mocked = shared.mocked.lock().unwrap().contains(&request_id);
+                let mut log = shared.requests.lock().unwrap();
+                if log.len() >= MAX_REQUESTS {
+                    log.pop_front();
+                }
+                log.push_back(RequestRecord {
+                    method: s(&p["request"], "method"),
+                    url: s(&p["request"], "url"),
+                    status: None,
+                    resource_type: s(p, "type"),
+                    mocked,
+                    request_id,
+                });
+                drop(log);
                 if st.requests.len() > 5_000 {
                     st.requests.clear();
                 }
@@ -950,6 +1066,14 @@ async fn pump_events(
             }
             "Network.responseReceived" => {
                 let status = p["response"]["status"].as_u64().unwrap_or(0) as u16;
+                {
+                    let id = s(p, "requestId");
+                    let mocked = shared.mocked.lock().unwrap().contains(&id);
+                    if let Some(r) = shared.requests.lock().unwrap().iter_mut().rev().find(|r| r.request_id == id) {
+                        r.status = Some(status);
+                        r.mocked |= mocked;
+                    }
+                }
                 if s(p, "type") == "Document" {
                     st.doc_status.insert(s(p, "loaderId"), status);
                 }
@@ -1356,6 +1480,59 @@ impl Backend for ChromiumBackend {
             return Err(js_error(ex));
         }
         Ok(r["result"].get("value").cloned().unwrap_or(Value::Null))
+    }
+
+    async fn add_route(&mut self, route: swiftbrowse_core::request::RouteArgs) -> Result<String> {
+        let url = route.matcher()?;
+        let n = self.shared.next_mock.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let id = format!("r{n}");
+        let first = {
+            let mut mocks = self.shared.mocks.lock().unwrap();
+            mocks.push(Mock { id: id.clone(), spec: route, url, hits: 0 });
+            mocks.len() == 1
+        };
+        if first {
+            // Interception costs a round trip per request: only while routes exist.
+            for session in self.tab_sessions() {
+                self.cdp.send("Fetch.enable", fetch_patterns(), Some(&session), CMD_TIMEOUT).await?;
+            }
+        }
+        Ok(id)
+    }
+
+    async fn remove_routes(&mut self, id: Option<&str>) -> Result<usize> {
+        let (removed, empty) = {
+            let mut mocks = self.shared.mocks.lock().unwrap();
+            let before = mocks.len();
+            mocks.retain(|m| id.is_some_and(|id| m.id != id));
+            (before - mocks.len(), mocks.is_empty())
+        };
+        if empty && removed > 0 {
+            for session in self.tab_sessions() {
+                let _ = self.cdp.send("Fetch.disable", json!({}), Some(&session), CMD_TIMEOUT).await;
+            }
+        }
+        Ok(removed)
+    }
+
+    async fn routes(&mut self) -> Result<Vec<Value>> {
+        Ok(self
+            .shared
+            .mocks
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                json!({
+                    "id": m.id, "url": m.spec.url, "url_regex": m.spec.url_regex, "method": m.spec.method,
+                    "action": m.spec.action, "hits": m.hits, "times": m.spec.times,
+                })
+            })
+            .collect())
+    }
+
+    async fn requests(&mut self) -> Result<Vec<RequestRecord>> {
+        Ok(self.shared.requests.lock().unwrap().iter().cloned().collect())
     }
 
     async fn upload_files(&mut self, ref_id: &str, files: &[PathBuf]) -> Result<Vec<String>> {

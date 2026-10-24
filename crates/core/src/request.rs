@@ -87,6 +87,12 @@ pub enum Condition {
     },
     NoConsoleErrors {},
     NoNetworkFailures {},
+    /// The page has sent a request whose URL contains `url_contains` (and with this method).
+    RequestSeen {
+        url_contains: String,
+        #[serde(default)]
+        method: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -249,6 +255,96 @@ pub struct UploadFileArgs {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteAction {
+    /// Answer with `status`, `body` / `json` and `headers` instead of the network.
+    #[default]
+    Fulfill,
+    /// Fail the request like a network error (`error`, default "Failed").
+    Abort,
+    /// Let it through unchanged (to carve an exception out of a broader route).
+    Continue,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteArgs {
+    /// URL glob: `**` matches anything, `*` anything but `/`, `?` one character,
+    /// e.g. `**/api/todos*`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Regular expression matched against the full URL, instead of `url`.
+    #[serde(default)]
+    pub url_regex: Option<String>,
+    /// Only this HTTP method (e.g. `POST`).
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub action: RouteAction,
+    /// Response status for `fulfill` (default 200).
+    #[serde(default)]
+    pub status: Option<u16>,
+    /// Response body for `fulfill`.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// JSON response body for `fulfill`; sets `content-type: application/json`.
+    #[serde(default)]
+    pub json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Network error for `abort`: Failed, Aborted, TimedOut, AccessDenied,
+    /// ConnectionClosed, ConnectionReset, ConnectionRefused, NameNotResolved,
+    /// InternetDisconnected, BlockedByClient.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Wait this long before answering (to test loading states).
+    #[serde(default)]
+    pub delay_ms: Option<u64>,
+    /// Only the first N matching requests; afterwards the route is removed.
+    #[serde(default)]
+    pub times: Option<u32>,
+}
+
+impl RouteArgs {
+    /// The URL matcher, from `url` (glob) or `url_regex`.
+    pub fn matcher(&self) -> crate::Result<regex::Regex> {
+        let pattern = match (&self.url, &self.url_regex) {
+            (Some(glob), None) => glob_to_regex(glob),
+            (None, Some(re)) => re.clone(),
+            _ => return Err(crate::CoreError::invalid("route needs exactly one of url (glob) or url_regex")),
+        };
+        regex::Regex::new(&pattern).map_err(|e| crate::CoreError::invalid(format!("bad route pattern: {e}")))
+    }
+}
+
+/// Playwright-style URL glob to an anchored regular expression.
+pub fn glob_to_regex(glob: &str) -> String {
+    let mut out = String::from("^");
+    let mut chars = glob.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                out.push_str(".*");
+            }
+            '*' => out.push_str("[^/]*"),
+            '?' => out.push('.'),
+            c => out.push_str(&regex::escape(&c.to_string())),
+        }
+    }
+    out.push('$');
+    out
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UnrouteArgs {
+    /// Route id from `route`; all routes when omitted.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewTabArgs {
@@ -367,6 +463,10 @@ pub enum Request {
     GoForward(HistoryArgs),
     Reload(HistoryArgs),
     Evaluate(EvaluateArgs),
+    Route(RouteArgs),
+    Unroute(UnrouteArgs),
+    ListRoutes(NoArgs),
+    GetRequests(NoArgs),
     NewTab(NewTabArgs),
     ListTabs(NoArgs),
     SwitchTab(SwitchTabArgs),
@@ -401,6 +501,10 @@ impl Request {
             Request::GoForward(_) => "go_forward",
             Request::Reload(_) => "reload",
             Request::Evaluate(_) => "evaluate",
+            Request::Route(_) => "route",
+            Request::Unroute(_) => "unroute",
+            Request::ListRoutes(_) => "list_routes",
+            Request::GetRequests(_) => "get_requests",
             Request::NewTab(_) => "new_tab",
             Request::ListTabs(_) => "list_tabs",
             Request::SwitchTab(_) => "switch_tab",
@@ -460,6 +564,10 @@ pub fn op_specs() -> Vec<OpSpec> {
         OpSpec { name: "go_forward", description: "Go forward one history entry and wait for the page to load.", schema: schema_of::<HistoryArgs> },
         OpSpec { name: "reload", description: "Reload the page and wait for it to load.", schema: schema_of::<HistoryArgs> },
         OpSpec { name: "evaluate", description: "Run a JavaScript expression in the page and return its JSON result. Only available when the session policy allows scripts (the test runner does; MCP needs --allow-evaluate).", schema: schema_of::<EvaluateArgs> },
+        OpSpec { name: "route", description: "Mock the network: requests matching a URL glob or regex (and method) are fulfilled with a status/body/JSON, aborted with a network error, or let through. Newest route wins; times limits uses.", schema: schema_of::<RouteArgs> },
+        OpSpec { name: "unroute", description: "Remove a route by id, or all routes.", schema: schema_of::<UnrouteArgs> },
+        OpSpec { name: "list_routes", description: "Active routes with how often each matched.", schema: schema_of::<NoArgs> },
+        OpSpec { name: "get_requests", description: "Requests the page made (method, URL, status, whether mocked), newest last.", schema: schema_of::<NoArgs> },
         OpSpec { name: "new_tab", description: "Open a new tab (optionally at a URL) in this session and make it active.", schema: schema_of::<NewTabArgs> },
         OpSpec { name: "list_tabs", description: "Open tabs of this session, including popups and target=_blank pages, with the active one marked.", schema: schema_of::<NoArgs> },
         OpSpec { name: "switch_tab", description: "Make a tab active by index, URL, title, or the newest one; waits for a matching tab to open (e.g. a popup).", schema: schema_of::<SwitchTabArgs> },
@@ -487,6 +595,20 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, crate::ErrorKind::InvalidArgument);
         assert!(Request::from_op("teleport", serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn route_globs_follow_playwright() {
+        let m = |glob: &str, url: &str| regex::Regex::new(&glob_to_regex(glob)).unwrap().is_match(url);
+        assert!(m("**/api/todos", "http://x.test/app/api/todos"));
+        assert!(!m("**/api/todos", "http://x.test/api/todos/1"));
+        assert!(m("**/api/todos*", "http://x.test/api/todos?page=2"));
+        assert!(m("http://x.test/*.png", "http://x.test/a.png"));
+        assert!(!m("http://x.test/*.png", "http://x.test/img/a.png"), "* stops at /");
+        assert!(m("**/v?/users", "http://x.test/v2/users"));
+        assert!(m("**/a+b(c)", "http://x.test/a+b(c)"), "regex characters are literal");
+        let both = RouteArgs { url: Some("x".into()), url_regex: Some("y".into()), ..Default::default() };
+        assert!(both.matcher().is_err());
     }
 
     #[test]

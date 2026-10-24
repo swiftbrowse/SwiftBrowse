@@ -528,6 +528,26 @@ impl Session {
                 }
                 Ok(Some(json!({ "files": selected })))
             }
+            Request::Route(a) => {
+                a.matcher()?;
+                if a.action == RouteAction::Fulfill && a.body.is_some() && a.json.is_some() {
+                    return Err(CoreError::invalid("route takes body or json, not both"));
+                }
+                let id = self.backend.add_route(a.clone()).await?;
+                Ok(Some(json!({ "id": id })))
+            }
+            Request::Unroute(a) => {
+                let removed = self.backend.remove_routes(a.id.as_deref()).await?;
+                if a.id.is_some() && removed == 0 {
+                    return Err(CoreError::new(ErrorKind::NotFound, "no route with that id"));
+                }
+                Ok(Some(json!({ "removed": removed })))
+            }
+            Request::ListRoutes(_) => Ok(Some(json!({ "routes": self.backend.routes().await? }))),
+            Request::GetRequests(_) => {
+                let requests = self.backend.requests().await?;
+                Ok(Some(json!({ "count": requests.len(), "requests": requests })))
+            }
             Request::NewTab(a) => {
                 let url = a.url.as_deref().map(|u| p.check_navigation(u)).transpose()?;
                 let timeout = p.timeout(a.timeout_ms);
@@ -885,6 +905,17 @@ impl Session {
             Condition::NoConsoleErrors {} => {
                 let errors = self.backend.console_errors().await?;
                 (errors.is_empty(), json!({ "count": errors.len(), "first": errors.first() }))
+            }
+            Condition::RequestSeen { url_contains, method } => {
+                let requests = self.backend.requests().await?;
+                let hits = requests
+                    .iter()
+                    .filter(|r| {
+                        r.url.contains(url_contains.as_str())
+                            && method.as_deref().is_none_or(|m| r.method.eq_ignore_ascii_case(m))
+                    })
+                    .count();
+                (hits > 0, json!({ "matching_requests": hits, "total_requests": requests.len() }))
             }
             Condition::NoNetworkFailures {} => {
                 let failures = self.backend.network_failures().await?;

@@ -280,6 +280,21 @@ pub struct NetworkFailure {
     pub timestamp_ms: u64,
 }
 
+/// A request the page made, for `request_seen` and diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RequestRecord {
+    pub method: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    pub resource_type: String,
+    /// Answered by a `route` instead of the network.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mocked: bool,
+    #[serde(skip)]
+    pub request_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DialogEvent {
     pub kind: String,

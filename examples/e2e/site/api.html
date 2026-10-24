@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Remote todos</title>
+<style>body { font: 16px system-ui, sans-serif; max-width: 520px; margin: 40px auto; }</style></head>
+<body>
+<h1>Remote todos</h1>
+<p id="state" role="status"></p>
+<ul id="list" aria-label="Remote todo list"></ul>
+<button id="retry">Retry</button>
+<form id="add"><label for="t">New remote todo</label> <input id="t"> <button>Save</button></form>
+<script>
+  const state = document.getElementById('state');
+  async function load() {
+    state.textContent = 'Loading…';
+    document.getElementById('list').innerHTML = '';
+    try {
+      const res = await fetch('api/todos');
+      if (!res.ok) { state.textContent = 'Could not load todos (HTTP ' + res.status + ')'; return; }
+      const items = await res.json();
+      for (const it of items) {
+        const li = document.createElement('li');
+        li.textContent = it.title;
+        document.getElementById('list').append(li);
+      }
+      state.textContent = items.length + ' todos';
+    } catch (e) {
+      state.textContent = 'Network error';
+    }
+  }
+  document.getElementById('retry').addEventListener('click', load);
+  document.getElementById('add').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const title = document.getElementById('t').value;
+    const res = await fetch('api/todos', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title }) });
+    const saved = await res.json();
+    state.textContent = res.status === 201 ? 'Saved #' + saved.id : 'Save failed';
+  });
+  load();
+</script>
+</body></html>
