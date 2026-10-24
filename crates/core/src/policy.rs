@@ -28,6 +28,9 @@ pub struct Policy {
     pub screenshot_on_failure: bool,
     /// Allow the `evaluate` operation (arbitrary page script). Off by default for agents.
     pub allow_evaluate: bool,
+    /// Directories `upload_file` may read from. Empty: uploads are refused, so a
+    /// page can never get an agent to hand over arbitrary local files.
+    pub upload_roots: Vec<PathBuf>,
     pub max_log_entries: usize,
 }
 
@@ -51,6 +54,7 @@ impl Default for Policy {
             evidence_dir: std::env::temp_dir().join("swiftbrowse-evidence"),
             screenshot_on_failure: true,
             allow_evaluate: false,
+            upload_roots: Vec::new(),
             max_log_entries: 500,
         }
     }
@@ -94,6 +98,30 @@ impl Policy {
             let re = Regex::new(&format!("(?i){p}")).ok()?;
             re.find(&haystack).map(|m| format!("target text matches {:?}", m.as_str()))
         })
+    }
+
+    /// Resolves a file to upload; it must exist inside one of `upload_roots`.
+    pub fn check_upload(&self, path: &str) -> Result<PathBuf> {
+        if self.upload_roots.is_empty() {
+            return Err(CoreError::new(
+                ErrorKind::PermissionDenied,
+                "file uploads are disabled; allow a directory (--allow-upload-dir) to enable them",
+            ));
+        }
+        let file = std::fs::canonicalize(path)
+            .map_err(|e| CoreError::invalid(format!("cannot read upload file {path:?}: {e}")))?;
+        if !file.is_file() {
+            return Err(CoreError::invalid(format!("{path:?} is not a file")));
+        }
+        let inside =
+            self.upload_roots.iter().filter_map(|r| std::fs::canonicalize(r).ok()).any(|r| file.starts_with(r));
+        if !inside {
+            return Err(CoreError::new(
+                ErrorKind::PermissionDenied,
+                format!("{path:?} is outside the directories allowed for uploads"),
+            ));
+        }
+        Ok(file)
     }
 
     /// Validates a caller-supplied file name stem so writes stay inside `evidence_dir`.
@@ -169,5 +197,22 @@ mod tests {
         assert!(p.evidence_path("../x", "png").is_err());
         assert!(p.evidence_path("a/b", "png").is_err());
         assert!(p.evidence_path("", "png").is_err());
+    }
+
+    #[test]
+    fn uploads_only_from_allowed_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = dir.path().join("ok");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::write(allowed.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "s").unwrap();
+        let mut p = Policy::default();
+        let a = allowed.join("a.txt");
+        assert_eq!(p.check_upload(a.to_str().unwrap()).unwrap_err().kind, ErrorKind::PermissionDenied, "off by default");
+        p.upload_roots = vec![allowed.clone()];
+        assert!(p.check_upload(a.to_str().unwrap()).is_ok());
+        let escape = allowed.join("../secret.txt");
+        assert_eq!(p.check_upload(escape.to_str().unwrap()).unwrap_err().kind, ErrorKind::PermissionDenied);
+        assert_eq!(p.check_upload(allowed.to_str().unwrap()).unwrap_err().kind, ErrorKind::InvalidArgument, "a directory");
     }
 }

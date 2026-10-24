@@ -237,6 +237,18 @@ pub struct HistoryArgs {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UploadFileArgs {
+    /// An `<input type="file">` (it may be hidden behind a styled button).
+    pub target: Target,
+    /// Files to select; an empty list clears the selection. Must lie in a
+    /// directory the policy allows for uploads.
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewTabArgs {
@@ -349,6 +361,7 @@ pub enum Request {
     TypeText(TypeTextArgs),
     PressKey(PressKeyArgs),
     SelectOption(SelectOptionArgs),
+    UploadFile(UploadFileArgs),
     WaitFor(WaitForArgs),
     GoBack(HistoryArgs),
     GoForward(HistoryArgs),
@@ -382,6 +395,7 @@ impl Request {
             Request::TypeText(_) => "type_text",
             Request::PressKey(_) => "press_key",
             Request::SelectOption(_) => "select_option",
+            Request::UploadFile(_) => "upload_file",
             Request::WaitFor(_) => "wait_for",
             Request::GoBack(_) => "go_back",
             Request::GoForward(_) => "go_forward",
@@ -440,6 +454,7 @@ pub fn op_specs() -> Vec<OpSpec> {
         OpSpec { name: "type_text", description: "Type text key by key into the target or focused element.", schema: schema_of::<TypeTextArgs> },
         OpSpec { name: "press_key", description: "Press a key or chord, optionally on a target and with an expected outcome.", schema: schema_of::<PressKeyArgs> },
         OpSpec { name: "select_option", description: "Choose an option of a <select> by value or label and verify the selection.", schema: schema_of::<SelectOptionArgs> },
+        OpSpec { name: "upload_file", description: "Select files on an <input type=file> and verify the selection. Only files inside directories the policy allows.", schema: schema_of::<UploadFileArgs> },
         OpSpec { name: "wait_for", description: "Wait until a condition holds or the timeout expires.", schema: schema_of::<WaitForArgs> },
         OpSpec { name: "go_back", description: "Go back one history entry and wait for the page to load.", schema: schema_of::<HistoryArgs> },
         OpSpec { name: "go_forward", description: "Go forward one history entry and wait for the page to load.", schema: schema_of::<HistoryArgs> },

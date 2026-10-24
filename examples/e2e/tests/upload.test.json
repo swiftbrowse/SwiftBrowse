@@ -1,0 +1,16 @@
+{
+  "name": "upload",
+  "tests": [
+    {
+      "name": "uploads files through a hidden input",
+      "steps": [
+        { "op": "navigate", "url": "upload.html" },
+        { "op": "upload_file", "target": "Documents", "files": ["fixtures/notes.txt", "fixtures/contacts.csv"] },
+        { "op": "expect", "conditions": [
+          { "type": "text_visible", "text": "notes.txt (26 bytes): hello from a test fixture" },
+          { "type": "text_visible", "text": "contacts.csv (31 bytes): name,email" }
+        ] }
+      ]
+    }
+  ]
+}

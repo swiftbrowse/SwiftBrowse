@@ -487,6 +487,47 @@ impl Session {
                 ctx.verification = Some(not_checked("script ran; its result is returned as data"));
                 Ok(Some(json!({ "value": value })))
             }
+            Request::UploadFile(a) => {
+                let files = a.files.iter().map(|f| p.check_upload(f)).collect::<Result<Vec<_>>>()?;
+                let timeout = p.timeout(a.timeout_ms);
+                ctx.timeout_ms = Some(timeout);
+                let mut poll = Poll::new(timeout);
+                a.target.locator.validate()?;
+                let el = loop {
+                    match self.resolve(&a.target).await {
+                        Ok(r) => break r,
+                        Err(e) if e.recoverable && poll.next().await => continue,
+                        Err(e) => return Err(e),
+                    }
+                };
+                if el.element.input_type.as_deref() != Some("file") {
+                    return Err(CoreError::invalid(format!(
+                        "{} is not an <input type=file>; target the file input itself",
+                        el.element.ref_id
+                    )));
+                }
+                let ref_id = el.element.ref_id.clone();
+                ctx.target = Some(el);
+                let selected = self.backend.upload_files(&ref_id, &files).await?;
+                let wanted: Vec<String> = files
+                    .iter()
+                    .map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+                    .collect();
+                let passed = selected == wanted;
+                ctx.verification = Some(Verification {
+                    status: if passed { VerificationStatus::Passed } else { VerificationStatus::Failed },
+                    checks: vec![Check {
+                        condition: json!({ "type": "files_selected", "files": wanted }),
+                        passed,
+                        observed: json!({ "files": selected }),
+                    }],
+                    note: None,
+                });
+                if !passed {
+                    return Err(CoreError::new(ErrorKind::VerificationFailed, "the input did not take the files"));
+                }
+                Ok(Some(json!({ "files": selected })))
+            }
             Request::NewTab(a) => {
                 let url = a.url.as_deref().map(|u| p.check_navigation(u)).transpose()?;
                 let timeout = p.timeout(a.timeout_ms);

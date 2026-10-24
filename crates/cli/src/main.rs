@@ -119,6 +119,9 @@ struct Common {
     /// Allow the `evaluate` operation (page scripts). `run` and `test` always allow it.
     #[arg(long)]
     allow_evaluate: bool,
+    /// Let `upload_file` read files from this directory (repeatable). Uploads are off without it.
+    #[arg(long = "allow-upload-dir", value_name = "DIR")]
+    upload_dirs: Vec<PathBuf>,
 }
 
 impl Common {
@@ -147,6 +150,7 @@ impl Common {
         }
         policy.require_approval_for_consequential = !self.no_approval;
         policy.allow_evaluate = self.allow_evaluate;
+        policy.upload_roots = self.upload_dirs.clone();
         policy
     }
 

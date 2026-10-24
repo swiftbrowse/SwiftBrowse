@@ -74,6 +74,10 @@ pub trait Backend: Send {
     fn tab_count(&self) -> usize {
         1
     }
+    /// Sets the files of an `<input type=file>` and returns the selected file names.
+    async fn upload_files(&mut self, _ref_id: &str, _files: &[std::path::PathBuf]) -> Result<Vec<String>> {
+        Err(CoreError::unsupported("file upload is not available on this backend"))
+    }
     /// Open tabs, in creation order.
     async fn tabs(&mut self) -> Result<Vec<TabInfo>> {
         Err(CoreError::unsupported("tabs are not available on this backend"))

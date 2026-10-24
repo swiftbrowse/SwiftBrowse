@@ -1047,7 +1047,7 @@ impl Backend for ChromiumBackend {
                     cap(names::ISOLATED_SESSIONS, Support::Full, Some("separate process and profile per session"))
                 },
                 cap(names::DOWNLOADS, Support::Unsupported, None),
-                cap(names::UPLOADS, Support::Unsupported, None),
+                cap(names::UPLOADS, Support::Full, Some("upload_file, limited to directories the policy allows")),
                 cap(names::VISUAL_GROUNDING, Support::Unsupported, None),
             ],
             warnings,
@@ -1344,6 +1344,18 @@ impl Backend for ChromiumBackend {
             return Err(js_error(ex));
         }
         Ok(r["result"].get("value").cloned().unwrap_or(Value::Null))
+    }
+
+    async fn upload_files(&mut self, ref_id: &str, files: &[PathBuf]) -> Result<Vec<String>> {
+        let object = self.element_object(ref_id).await?;
+        let files: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+        let session = self.context_session().to_string();
+        // Fires `input` and `change` like a user's choice in the file dialog.
+        self.cdp
+            .send("DOM.setFileInputFiles", json!({ "files": files, "objectId": object }), Some(&session), CMD_TIMEOUT)
+            .await?;
+        let v = self.call("fileNames", json!([ref_id])).await?;
+        serde_json::from_value(v).map_err(|e| CoreError::backend(e.to_string()))
     }
 
     fn tab_count(&self) -> usize {

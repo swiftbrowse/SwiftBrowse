@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Upload</title>
+<style>body { font: 16px system-ui, sans-serif; margin: 40px; } input[type=file] { display: none; } .pick { border: 1px solid #888; padding: 6px 12px; cursor: pointer; }</style>
+</head>
+<body>
+<h1>Upload</h1>
+<label class="pick" for="docs">Choose files</label>
+<input type="file" id="docs" multiple aria-label="Documents">
+<ul id="list" aria-label="Selected files"></ul>
+<script>
+  document.getElementById('docs').addEventListener('change', async (e) => {
+    const list = document.getElementById('list');
+    list.innerHTML = '';
+    for (const f of e.target.files) {
+      const li = document.createElement('li');
+      const firstLine = (await f.text()).split('\n')[0];
+      li.textContent = `${f.name} (${f.size} bytes): ${firstLine}`;
+      list.append(li);
+    }
+  });
+</script>
+</body></html>

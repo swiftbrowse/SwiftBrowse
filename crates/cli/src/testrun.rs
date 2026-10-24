@@ -239,7 +239,7 @@ fn substitute(v: &mut Value, vars: &BTreeMap<String, String>, re: &Regex) -> Res
     Ok(())
 }
 
-fn parse_step(step: &Value, base: Option<&url::Url>, expect_timeout_ms: u64) -> Result<Step, String> {
+fn parse_step(step: &Value, base: Option<&url::Url>, dir: &Path, expect_timeout_ms: u64) -> Result<Step, String> {
     let mut obj = step.as_object().cloned().ok_or("a step must be a JSON object")?;
     let op = obj.remove("op").and_then(|v| v.as_str().map(str::to_string)).ok_or("missing \"op\"")?;
     let label = format!("{op} {}", short(&Value::Object(obj.clone())));
@@ -261,6 +261,16 @@ fn parse_step(step: &Value, base: Option<&url::Url>, expect_timeout_ms: u64) -> 
             if url::Url::parse(u).is_err() {
                 let joined = base.join(u).map_err(|e| format!("cannot resolve {u:?} against the base URL: {e}"))?;
                 obj.insert("url".into(), json!(joined.as_str()));
+            }
+        }
+    }
+    // Upload paths are relative to the test file.
+    if op == "upload_file" {
+        if let Some(Value::Array(files)) = obj.get_mut("files") {
+            for f in files.iter_mut() {
+                if let Some(path) = f.as_str().filter(|p| Path::new(p).is_relative()) {
+                    *f = json!(dir.join(path).display().to_string());
+                }
             }
         }
     }
@@ -302,6 +312,7 @@ fn load(path: &Path, opts: &LoadOptions) -> Result<Vec<TestCase>, String> {
         None => None,
     };
     let file = path.display().to_string();
+    let dir = path.parent().unwrap_or(Path::new("."));
     let suite = spec.name.clone().unwrap_or_else(|| {
         let n = path.file_name().and_then(|n| n.to_str()).unwrap_or("tests");
         n.trim_end_matches(".json").trim_end_matches(".test").trim_end_matches(".spec").to_string()
@@ -310,7 +321,8 @@ fn load(path: &Path, opts: &LoadOptions) -> Result<Vec<TestCase>, String> {
         list.iter()
             .enumerate()
             .map(|(i, s)| {
-                parse_step(s, base.as_ref(), opts.expect_timeout_ms).map_err(|e| format!("{what} step {}: {e}", i + 1))
+                parse_step(s, base.as_ref(), dir, opts.expect_timeout_ms)
+                    .map_err(|e| format!("{what} step {}: {e}", i + 1))
             })
             .collect()
     };
@@ -423,6 +435,8 @@ struct TestResult {
 
 struct Runner {
     common: Common,
+    /// Where `upload_file` may read: the working directory and the test files' directories.
+    upload_roots: Vec<PathBuf>,
     expect_timeout_ms: u64,
     timeout_ms: Option<u64>,
     output_dir: PathBuf,
@@ -449,6 +463,7 @@ impl Runner {
         // The runner captures one screenshot per failed attempt itself.
         policy.screenshot_on_failure = false;
         policy.allow_evaluate = true;
+        policy.upload_roots.extend(self.upload_roots.iter().cloned());
         // Tests run against test environments: "Delete" and "Pay" are normal clicks.
         policy.require_approval_for_consequential = false;
         policy.default_timeout_ms = self.timeout_ms.unwrap_or(self.expect_timeout_ms);
@@ -880,8 +895,11 @@ pub async fn run(args: TestArgs) -> ExitCode {
 
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     let workers = args.workers.unwrap_or((cpus / 2).max(1)).max(1);
+    let mut upload_roots = vec![PathBuf::from(".")];
+    upload_roots.extend(files.iter().filter_map(|f| f.parent().map(Path::to_path_buf)));
     let runner = Arc::new(Runner {
         common: args.common.clone(),
+        upload_roots,
         expect_timeout_ms: args.expect_timeout_ms,
         timeout_ms: args.common.timeout_ms,
         output_dir: output_dir.clone(),
