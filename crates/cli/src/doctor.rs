@@ -1,13 +1,46 @@
 //! `swiftbrowse doctor`: report what this machine can actually run.
 
-use std::process::{Command, ExitCode};
+use std::path::Path;
+use std::process::{Command, ExitCode, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use swiftbrowse_chromium::launch;
 
+/// Runs a command and returns its trimmed stdout; gives up (and kills it) after 10 s.
 fn output(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(cmd).args(args).output().ok()?;
+    let mut child =
+        Command::new(cmd).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let out = child.wait_with_output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The browser's version without starting a browser. On Windows, `chrome.exe
+/// --version` ignores the flag and opens a browser, so the version comes from
+/// the versioned folder Chrome installs next to the executable.
+fn browser_version(path: &Path) -> Option<String> {
+    if cfg!(windows) {
+        let dir = path.parent()?;
+        let is_version = |n: &str| n.split('.').count() == 4 && n.split('.').all(|p| p.parse::<u32>().is_ok());
+        let found = std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            (e.path().is_dir() && is_version(&name)).then_some(name)
+        });
+        return Some(found.map(|v| format!("Chromium {v}")).unwrap_or_else(|| "version unknown".into()));
+    }
+    output(&path.display().to_string(), &["--version"])
 }
 
 fn check(name: &str, status: &str, detail: impl Into<String>) -> Value {
@@ -48,7 +81,7 @@ pub fn run(as_json: bool) -> ExitCode {
     let mut ready = false;
     match &chromium {
         Some(path) => {
-            let version = output(&path.display().to_string(), &["--version"]);
+            let version = browser_version(path);
             ready = version.is_some();
             checks.push(match version {
                 Some(v) => check("chromium", "ok", format!("{v} at {}", path.display())),
@@ -70,7 +103,7 @@ pub fn run(as_json: bool) -> ExitCode {
     }
     match launch::discover_headless_shell() {
         Some(path) => {
-            let v = output(&path.display().to_string(), &["--version"]).unwrap_or_else(|| "version unknown".into());
+            let v = browser_version(&path).unwrap_or_else(|| "version unknown".into());
             checks.push(check("headless_shell", "ok", format!("{v} at {} (used for headless sessions)", path.display())));
         }
         None => checks.push(check(
