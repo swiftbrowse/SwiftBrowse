@@ -7,7 +7,9 @@ import path from 'node:path';
 const require = createRequire(import.meta.url);
 
 /** npm package carrying the binary for this platform, e.g. `swiftbrowse-linux-x64`. */
-export const platformPackage = () => `swiftbrowse-${process.platform}-${process.arch}`;
+// Windows' package is `swiftbrowse-windows-x64` (npm refused the name with `win32`).
+export const platformPackage = () =>
+  `swiftbrowse-${process.platform === 'win32' ? 'windows' : process.platform}-${process.arch}`;
 
 export function findBinary(explicit) {
   if (explicit) return explicit;

@@ -31,4 +31,4 @@ Every engine operation is a typed method (`navigate`, `click`, `fill`, `check`, 
 
 `npx swiftbrowse test` runs JSON test files with parallel workers, retries, traces, video and JUnit/HTML reports; `npx swiftbrowse mcp` serves the Model Context Protocol for agents. See the [main README](https://github.com/swiftbrowse/swiftbrowse#readme).
 
-The native binary comes from a platform package (`swiftbrowse-linux-x64`, `-linux-arm64`, `-darwin-arm64`, `-darwin-x64`, `-win32-x64`) installed automatically; set `SWIFTBROWSE_BIN` to use another.
+The native binary comes from a platform package (`swiftbrowse-linux-x64`, `-linux-arm64`, `-darwin-arm64`, `-darwin-x64`, `-windows-x64`) installed automatically; set `SWIFTBROWSE_BIN` to use another.

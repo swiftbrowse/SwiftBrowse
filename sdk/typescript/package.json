@@ -45,8 +45,8 @@
   "optionalDependencies": {
     "swiftbrowse-linux-x64": "0.1.0",
     "swiftbrowse-linux-arm64": "0.1.0",
-    "swiftbrowse-darwin-x64": "0.1.0",
     "swiftbrowse-darwin-arm64": "0.1.0",
-    "swiftbrowse-win32-x64": "0.1.0"
+    "swiftbrowse-darwin-x64": "0.1.0",
+    "swiftbrowse-windows-x64": "0.1.0"
   }
 }

@@ -135,12 +135,18 @@ jobs:
           [ -n "$NPM_TOKEN" ] || { echo "::error::repository secret NPM_TOKEN is not set"; exit 1; }
           [ -n "$PYPI_TOKEN" ] || { echo "::error::repository secret PYPI_TOKEN is not set"; exit 1; }
       # Platform packages first: `swiftbrowse` depends on them. Versions already on
-      # the registry are skipped, so a failed run can simply be re-run.
+      # the registry are skipped, so a failed run can simply be re-run. A refused
+      # platform package does not stop the rest: `swiftbrowse` then lists only the
+      # platform packages that are on the registry, and the run fails at the end.
       - name: Publish to npm
+        id: npm
+        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          for dir in dist/npm/swiftbrowse-* dist/npm/swiftbrowse; do
+          failed=0
+          publish() {
+            dir=$1
             name=$(node -p "require('./$dir/package.json').name")
             if [ "$DRY_RUN" = "true" ]; then
               (cd "$dir" && npm publish --dry-run --access public)
@@ -149,7 +155,22 @@ jobs:
             else
               (cd "$dir" && npm publish --access public --provenance)
             fi
+          }
+          for dir in dist/npm/swiftbrowse-*; do
+            publish "$dir" || { echo "::error::$(basename "$dir") was not published"; failed=1; }
           done
+          if [ "$DRY_RUN" != "true" ]; then
+            node -e '
+              const fs = require("fs"), { execSync } = require("child_process");
+              const file = "dist/npm/swiftbrowse/package.json", pkg = JSON.parse(fs.readFileSync(file));
+              for (const name of Object.keys(pkg.optionalDependencies)) {
+                try { execSync(`npm view ${name}@${pkg.version} version`, { stdio: "ignore" }); }
+                catch { console.log(`::warning::${name} is not on the registry; left out of swiftbrowse`); delete pkg.optionalDependencies[name]; }
+              }
+              fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");'
+          fi
+          publish dist/npm/swiftbrowse || failed=1
+          exit $failed
       - name: Publish to PyPI
         if: env.DRY_RUN != 'true'
         env:
@@ -175,3 +196,8 @@ jobs:
           (cd dist/archives && sha256sum * > SHA256SUMS)
           gh release view "$TAG" > /dev/null 2>&1 \
             || gh release create "$TAG" --target "$GITHUB_SHA" --title "SwiftBrowse $VERSION" --generate-notes dist/archives/*
+      - name: Fail if npm publishing was incomplete
+        if: steps.npm.outcome == 'failure'
+        run: |
+          echo "::error::some npm packages were not published; see the Publish to npm step"
+          exit 1
