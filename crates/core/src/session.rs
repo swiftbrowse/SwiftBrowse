@@ -48,6 +48,7 @@ enum Act<'a> {
     Click { approved: bool, consequential: Option<bool> },
     Fill(&'a str),
     Focus,
+    Hover,
     Select(&'a str),
 }
 
@@ -170,6 +171,8 @@ impl Session {
                 | Request::SelectOption(_)
                 | Request::WaitFor(_)
                 | Request::AssertPageState(_)
+                | Request::Hover(_)
+                | Request::Check(_)
         );
         let invalid_request = error.as_ref().is_some_and(|e| {
             matches!(e.kind, ErrorKind::InvalidArgument | ErrorKind::PermissionDenied | ErrorKind::ApprovalRequired)
@@ -341,6 +344,39 @@ impl Session {
                 self.verify_expect(a.expect.as_ref(), &mut poll, ctx, "click").await?;
                 Ok(None)
             }
+            Request::Hover(a) => {
+                let timeout = p.timeout(a.timeout_ms);
+                ctx.timeout_ms = Some(timeout);
+                let mut poll = Poll::new(timeout);
+                self.act(&a.target, Act::Hover, &mut poll, ctx).await?;
+                self.verify_expect(a.expect.as_ref(), &mut poll, ctx, "hover").await?;
+                Ok(None)
+            }
+            Request::Check(a) => {
+                let timeout = p.timeout(a.timeout_ms);
+                ctx.timeout_ms = Some(timeout);
+                let mut poll = Poll::new(timeout);
+                let want = a.checked;
+                let current = loop {
+                    match self.resolve(&a.target).await {
+                        Ok(r) => break r.element.checked,
+                        Err(e) if e.recoverable && poll.next().await => continue,
+                        Err(e) => return Err(e),
+                    }
+                };
+                if current.is_none() {
+                    return Err(CoreError::invalid("check needs a checkbox, radio or element with aria-checked"));
+                }
+                let mut clicked = false;
+                if current != Some(want) {
+                    let act = Act::Click { approved: false, consequential: Some(false) };
+                    self.act(&a.target, act, &mut poll, ctx).await?;
+                    clicked = true;
+                }
+                let cond = Condition::Checked { target: a.target.clone(), checked: want };
+                self.verify_expect(Some(&cond), &mut poll, ctx, "check").await?;
+                Ok(Some(json!({ "checked": want, "changed": clicked })))
+            }
             Request::Fill(a) => {
                 let timeout = p.timeout(a.timeout_ms);
                 ctx.timeout_ms = Some(timeout);
@@ -420,6 +456,37 @@ impl Session {
                 }
                 Ok(Some(json!({ "checks": checks })))
             }
+            Request::GoBack(a) | Request::GoForward(a) | Request::Reload(a) => {
+                let delta = match req {
+                    Request::GoBack(_) => -1,
+                    Request::GoForward(_) => 1,
+                    _ => 0,
+                };
+                let timeout = p.timeout(a.timeout_ms);
+                ctx.timeout_ms = Some(timeout);
+                let nav = self.backend.history(delta, Duration::from_millis(timeout)).await?;
+                p.check_navigation(&nav.url).map_err(|e| {
+                    CoreError::new(
+                        ErrorKind::PermissionDenied,
+                        format!("history led outside the policy: {}", e.message),
+                    )
+                })?;
+                self.last_snapshot = None;
+                Ok(Some(serde_json::to_value(nav).unwrap_or_default()))
+            }
+            Request::Evaluate(a) => {
+                if !p.allow_evaluate {
+                    return Err(CoreError::new(
+                        ErrorKind::PermissionDenied,
+                        "evaluate is disabled by policy (enabled in the test runner; MCP needs --allow-evaluate)",
+                    ));
+                }
+                let timeout = p.timeout(a.timeout_ms);
+                ctx.timeout_ms = Some(timeout);
+                let value = self.backend.evaluate(&a.expression, Duration::from_millis(timeout)).await?;
+                ctx.verification = Some(not_checked("script ran; its result is returned as data"));
+                Ok(Some(json!({ "value": value })))
+            }
             Request::GetScreenshot(a) => {
                 let stem = a.name.clone().unwrap_or_else(|| action_id.to_string());
                 let ev = self.capture(&stem, action_id, a.full_page).await?;
@@ -494,6 +561,7 @@ impl Session {
                     Act::Click { .. } => self.backend.click(&ref_id).await,
                     Act::Fill(v) => self.backend.fill(&ref_id, v).await,
                     Act::Focus => self.backend.focus(&ref_id).await,
+                    Act::Hover => self.backend.hover(&ref_id).await,
                     Act::Select(o) => self.backend.select_option(&ref_id, o).await.map(|s| ctx.selected = Some(s)),
                 }?;
                 Ok(ref_id)
@@ -592,6 +660,29 @@ impl Session {
             Condition::TitleContains { value } => {
                 let title = self.backend.page_state().await?.title;
                 (title.contains(value.as_str()), json!({ "title": title }))
+            }
+            Condition::TitleEquals { value } => {
+                let title = self.backend.page_state().await?.title;
+                (title == *value, json!({ "title": title }))
+            }
+            Condition::TextEquals { target, text } | Condition::TextContains { target, text } => {
+                match self.resolve_soft(target).await? {
+                    Some(el) => {
+                        let actual = match self.backend.read_text(&el.ref_id).await {
+                            Ok(t) => t,
+                            Err(e) if e.kind == ErrorKind::StaleElement => {
+                                return Ok((false, json!({ "found": false })))
+                            }
+                            Err(e) => return Err(e),
+                        };
+                        let passed = match c {
+                            Condition::TextEquals { .. } => actual == *text,
+                            _ => actual.contains(text.as_str()),
+                        };
+                        (passed, json!({ "text": actual }))
+                    }
+                    None => (false, json!({ "found": false })),
+                }
             }
             Condition::Visible { target } | Condition::Hidden { target } => {
                 let matches = self.matches_for_condition(target).await?;

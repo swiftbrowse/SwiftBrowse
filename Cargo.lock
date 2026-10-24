@@ -801,7 +801,10 @@ dependencies = [
 name = "swiftbrowse-cli"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
+ "futures-util",
+ "regex",
  "serde",
  "serde_json",
  "swiftbrowse-chromium",
@@ -809,6 +812,7 @@ dependencies = [
  "swiftbrowse-mcp",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

@@ -1,4 +1,5 @@
 mod doctor;
+mod testrun;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -33,6 +34,9 @@ enum Command {
         #[command(flatten)]
         common: Common,
     },
+    /// Run end-to-end tests: every `*.test.json` / `*.spec.json` under the given
+    /// paths, in parallel sessions, with retries and list/JSON/JUnit/HTML reports.
+    Test(Box<testrun::TestArgs>),
     /// Navigate and print a compact page snapshot.
     Snapshot {
         url: String,
@@ -112,10 +116,23 @@ struct Common {
     /// daemon (also `SWIFTBROWSE_DAEMON=off`).
     #[arg(long)]
     no_daemon: bool,
+    /// Allow the `evaluate` operation (page scripts). `run` and `test` always allow it.
+    #[arg(long)]
+    allow_evaluate: bool,
 }
 
 impl Common {
     fn manager(&self) -> SessionManager {
+        self.manager_with(self.policy())
+    }
+
+    fn manager_with(&self, policy: Policy) -> SessionManager {
+        let factory =
+            ChromiumFactory { executable: self.chromium.clone(), daemon: self.daemon_mode(), ..Default::default() };
+        SessionManager::new(Arc::new(factory), policy)
+    }
+
+    fn policy(&self) -> Policy {
         let mut policy = Policy::default();
         if let Some(dir) = &self.evidence_dir {
             policy.evidence_dir = dir.clone();
@@ -129,9 +146,8 @@ impl Common {
             policy.default_timeout_ms = t;
         }
         policy.require_approval_for_consequential = !self.no_approval;
-        let factory =
-            ChromiumFactory { executable: self.chromium.clone(), daemon: self.daemon_mode(), ..Default::default() };
-        SessionManager::new(Arc::new(factory), policy)
+        policy.allow_evaluate = self.allow_evaluate;
+        policy
     }
 
     /// Headless sessions attach to the warm-browser daemon unless told not to.
@@ -215,7 +231,11 @@ async fn main() -> ExitCode {
             ];
             one_shot(&common, steps).await
         }
-        Command::Run { script, common } => run_script(&script, &common).await,
+        Command::Run { script, mut common } => {
+            common.allow_evaluate = true;
+            run_script(&script, &common).await
+        }
+        Command::Test(args) => testrun::run(*args).await,
     }
 }
 
@@ -342,7 +362,7 @@ async fn daemon_command(action: DaemonAction) -> ExitCode {
             }
         },
         DaemonAction::Stop => {
-            let stopped = daemon::call("SwiftBrowse.shutdown").await.is_some();
+            let stopped = daemon::stop(std::time::Duration::from_secs(10)).await;
             print(&json!({ "stopped": stopped }));
             ExitCode::SUCCESS
         }

@@ -26,6 +26,8 @@ pub struct Policy {
     /// The only directory the runtime writes to.
     pub evidence_dir: PathBuf,
     pub screenshot_on_failure: bool,
+    /// Allow the `evaluate` operation (arbitrary page script). Off by default for agents.
+    pub allow_evaluate: bool,
     pub max_log_entries: usize,
 }
 
@@ -48,6 +50,7 @@ impl Default for Policy {
             max_ax_nodes: 500,
             evidence_dir: std::env::temp_dir().join("swiftbrowse-evidence"),
             screenshot_on_failure: true,
+            allow_evaluate: false,
             max_log_entries: 500,
         }
     }

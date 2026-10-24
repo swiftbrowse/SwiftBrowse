@@ -287,6 +287,9 @@
   }
 
   function checkActionable(el) {
+    // Until the parser finishes, the page's own scripts may not have attached
+    // their handlers yet: input now could be silently lost.
+    if (document.readyState === 'loading') fail('not_actionable', 'the page is still loading');
     if (!visible(el)) fail('not_actionable', refOf(el) + ' is not visible');
     if (!enabled(el)) fail('not_actionable', refOf(el) + ' is disabled');
   }
@@ -337,6 +340,46 @@
   }
 
   async function prepareClick(r) {
+    const pt = await pointAt(r);
+    const el = get(r);
+    arm(el);
+    guardClick(el);
+    return pt;
+  }
+
+  // Hit-target check on every event of the click: the page can move the target
+  // between measuring and pressing, or between press and release (a late layout
+  // shift). From the first event that would land elsewhere, the rest of the
+  // click is blocked before page handlers see it, and the click is reported as
+  // missed so it can be retried at the new position.
+  const GUARDED = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+  let guard = null;
+  function guardClick(el) {
+    clickDone();
+    const g = { missed: false, seen: 0, hit: null };
+    g.listener = (e) => {
+      if (!g.missed) {
+        const t = e.composedPath()[0];
+        if (t instanceof Element && receives(el, t)) { g.seen++; return; }
+        g.missed = true;
+        g.hit = t instanceof Element ? describeBrief(t) : 'nothing';
+      }
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    for (const t of GUARDED) addEventListener(t, g.listener, true);
+    guard = g;
+  }
+  function clickDone() {
+    const g = guard;
+    guard = null;
+    if (!g) return null;
+    for (const t of GUARDED) removeEventListener(t, g.listener, true);
+    return { missed: g.missed, seen: g.seen, hit: g.hit };
+  }
+
+  // Actionable centre point of the element, after scrolling it into view.
+  async function pointAt(r) {
     const el = get(r);
     checkActionable(el);
     el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
@@ -358,7 +401,6 @@
     const y = b.y + b.height / 2;
     const hit = deepHit(x, y);
     if (!receives(el, hit)) fail('not_actionable', r + ' is covered by ' + describeBrief(hit));
-    arm(el);
     return { x, y };
   }
 
@@ -536,6 +578,11 @@
     describe: (r) => info(get(r)),
     readValue,
     prepareClick,
+    clickDone,
+    pointAt,
+    readText: (r) => textOf(get(r)),
+    // Identifies the current document: timeOrigin changes with every new document.
+    docState: () => ({ origin: performance.timeOrigin, url: location.href, ready: document.readyState }),
     focus: (r) => focus(r, false, false),
     prepareFill,
     selectOption,

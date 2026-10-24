@@ -1,0 +1,63 @@
+{
+  "name": "sign in",
+  "vars": { "email": "ada@example.com", "password": "secret" },
+  "before_each": [
+    { "op": "navigate", "url": "login.html" }
+  ],
+  "tests": [
+    {
+      "name": "signs in and reaches the dashboard",
+      "tags": ["smoke"],
+      "steps": [
+        { "op": "fill", "target": "Email", "value": "${email}" },
+        { "op": "fill", "target": "Password", "value": "${password}" },
+        { "op": "select_option", "target": "Plan", "option": "Pro" },
+        { "op": "check", "target": "Remember me" },
+        { "op": "click", "target": { "by": "role", "role": "button", "name": "Sign in" },
+          "expect": { "type": "url_contains", "value": "dashboard.html" } },
+        { "op": "expect", "conditions": [
+          { "type": "title_equals", "value": "Dashboard" },
+          { "type": "text_equals", "target": { "by": "test_id", "id": "hello" }, "text": "Welcome, ${email}" },
+          { "type": "text_visible", "text": "pro" },
+          { "type": "no_console_errors" }
+        ] }
+      ]
+    },
+    {
+      "name": "rejects a wrong password",
+      "steps": [
+        { "op": "fill", "target": "Email", "value": "${email}" },
+        { "op": "fill", "target": "Password", "value": "nope" },
+        { "op": "click", "target": { "by": "role", "role": "button", "name": "Sign in" },
+          "expect": { "type": "text_equals", "target": { "by": "role", "role": "alert" }, "text": "Wrong password" } },
+        { "op": "expect", "condition": { "type": "url_contains", "value": "login.html" } }
+      ]
+    },
+    {
+      "name": "validates the email",
+      "steps": [
+        { "op": "fill", "target": "Email", "value": "not-an-email" },
+        { "op": "click", "target": { "by": "role", "role": "button", "name": "Sign in" },
+          "expect": { "type": "text_visible", "text": "Enter a valid email" } }
+      ]
+    },
+    {
+      "name": "signs out",
+      "steps": [
+        { "op": "fill", "target": "Email", "value": "${email}" },
+        { "op": "fill", "target": "Password", "value": "${password}" },
+        { "op": "click", "target": { "by": "role", "role": "button", "name": "Sign in" },
+          "expect": { "type": "title_equals", "value": "Dashboard" } },
+        { "op": "click", "target": "Sign out",
+          "expect": { "type": "title_equals", "value": "Sign in" } }
+      ]
+    },
+    {
+      "name": "redirects to sign-in without a session",
+      "steps": [
+        { "op": "navigate", "url": "dashboard.html" },
+        { "op": "expect", "condition": { "type": "url_contains", "value": "login.html" } }
+      ]
+    }
+  ]
+}

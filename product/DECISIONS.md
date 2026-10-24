@@ -53,3 +53,11 @@
 - **Why it's credible today:** a flow file runs as a test (`swiftbrowse run`, exit 0/1, per-step `expect` and `assert_page_state`, evidence report), and the same steps are the MCP tools, so agent runs can become regression tests.
 - **What the claim now requires:** run a directory of flows, JUnit output, screenshot on failure, retries; a fail-fast `expect`. Listed under Next in STRATEGY and as gaps in the README.
 - **Reversibility:** two-way door (wording).
+
+## 2026-10-24 · Test runner, and beating Playwright Test
+- **Asked for:** test-runner basics and a win over Playwright Test, to make SwiftBrowse a complete automation and end-to-end testing framework.
+- **Built:** `swiftbrowse test`: discovery of `*.test.json`/`*.spec.json`, parallel workers (one isolated context per test), retries with flaky detection, `--repeat-each`, grep/tags, shards, skip/only/forbid-only, `before_each`/`after_each`, variables and env, base URL, `--serve DIR` and `--web-server CMD`, list/dot/JSON/JUnit/HTML reports, failure screenshot + page text snapshot + console/network errors. New operations for everyone (MCP too): `hover`, `check`, `go_back`, `go_forward`, `reload`, `evaluate` (policy-gated, off over MCP by default), conditions `title_equals`, `text_equals`, `text_contains`, and string targets as `auto` shorthand.
+- **Reliability fixes found while building it:** (1) clicks now wait until the page's own scripts have run; (2) every event of a click is hit-tested as it happens, and a click the layout moved away from is blocked and retried instead of silently landing on `<body>` (reproduced at 3/40, then 0/150); (3) the daemon's address includes a hash of the page helper, so clients never attach to a daemon from another build; (4) `daemon stop` waits for the daemon to exit, and a client that races a stopping daemon spawns a new one instead of waiting 10 s.
+- **Result:** 2.3–3.8× faster than Playwright Test on the same 12/60-test suite and binary, first run included (README table, `bench/e2e.mjs`).
+- **Not done:** traces/video, network mocking, uploads, frames/tabs, storage-state reuse, code-based tests (needs the SDKs), other browsers.
+- **Reversibility:** two-way door (new command and operations; existing ones unchanged).

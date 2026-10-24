@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Sign in</title>
+<style>body { font: 16px system-ui, sans-serif; max-width: 420px; margin: 40px auto; } .field { margin: 8px 0; }</style>
+</head>
+<body>
+<h1>Sign in</h1>
+<form id="login" novalidate>
+  <div class="field"><label for="email">Email</label> <input id="email" type="email"></div>
+  <div class="field"><label for="password">Password</label> <input id="password" type="password"></div>
+  <div class="field"><label for="plan">Plan</label>
+    <select id="plan"><option value="free">Free</option><option value="pro">Pro</option><option value="team">Team</option></select></div>
+  <div class="field"><input type="checkbox" id="remember"> <label for="remember">Remember me</label></div>
+  <button type="submit">Sign in</button>
+</form>
+<p id="msg" role="alert"></p>
+<script>
+  document.getElementById('login').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = document.getElementById('email').value;
+    const pw = document.getElementById('password').value;
+    const msg = document.getElementById('msg');
+    if (!/^[^@\s]+@[^@\s]+$/.test(email)) { msg.textContent = 'Enter a valid email'; return; }
+    if (pw !== 'secret') { msg.textContent = 'Wrong password'; return; }
+    msg.textContent = 'Signing in…';
+    await new Promise((r) => setTimeout(r, 150));
+    sessionStorage.setItem('user', email);
+    sessionStorage.setItem('plan', document.getElementById('plan').value);
+    location.href = 'dashboard.html';
+  });
+</script>
+</body>
+</html>

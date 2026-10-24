@@ -39,13 +39,24 @@ pub type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
 /// Where the daemon listens: a socket path (Unix) or pipe name (Windows),
 /// versioned so a client never talks to a daemon from another build.
+/// Identifies what a daemon prepares for its clients: the version plus a hash of
+/// the page helper it installs, so a client never attaches to a daemon from a
+/// different build.
+fn build_id() -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in crate::HELPER.bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{}-{:08x}", env!("CARGO_PKG_VERSION"), h as u32)
+}
+
 pub fn endpoint() -> String {
     if let Some(p) = std::env::var_os(ENV_SOCKET) {
         return p.to_string_lossy().into_owned();
     }
     #[cfg(unix)]
     {
-        state_dir().join(format!("daemon-{}.sock", env!("CARGO_PKG_VERSION"))).display().to_string()
+        state_dir().join(format!("daemon-{}.sock", build_id())).display().to_string()
     }
     #[cfg(windows)]
     {
@@ -54,7 +65,7 @@ pub fn endpoint() -> String {
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
-        format!(r"\\.\pipe\swiftbrowse-{user}-{}", env!("CARGO_PKG_VERSION"))
+        format!(r"\\.\pipe\swiftbrowse-{user}-{}", build_id())
     }
 }
 
@@ -149,6 +160,14 @@ mod ipc {
         Some((Box::new(r), Box::new(w)))
     }
 
+    /// True when no daemon holds this endpoint's lock (none is running or starting).
+    pub fn endpoint_free() -> bool {
+        use std::os::fd::AsRawFd;
+        let Ok(lock) = std::fs::OpenOptions::new().read(true).open(state_file("lock")) else { return true };
+        // The lock is released when `lock` is dropped.
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    }
+
     /// Holds the single-daemon lock for as long as it lives.
     pub struct Listener {
         listener: UnixListener,
@@ -228,6 +247,15 @@ mod ipc {
         };
         let (r, w) = tokio::io::split(client);
         Some((Box::new(r), Box::new(w)))
+    }
+
+    /// True when no daemon owns the pipe name. A probe connection that sends no
+    /// hello is simply dropped by the daemon.
+    pub fn endpoint_free() -> bool {
+        match ClientOptions::new().open(endpoint()) {
+            Ok(_) => false,
+            Err(e) => e.raw_os_error() != Some(ERROR_PIPE_BUSY),
+        }
     }
 
     pub struct Listener {
@@ -330,14 +358,32 @@ pub async fn connect_or_spawn(spawn: Option<&(PathBuf, Vec<String>)>) -> Option<
     }
     let (program, args) = spawn?;
     spawn_detached(program, args).ok()?;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut spawned_at = Instant::now();
+    let deadline = spawned_at + Duration::from_secs(10);
     while Instant::now() < deadline {
         if let Some(c) = connect().await {
             return Some(c);
         }
+        // The daemon we started exits at once if an old one (still shutting
+        // down) held the endpoint. Once that one is gone, start another.
+        if spawned_at.elapsed() > Duration::from_millis(250) && ipc::endpoint_free() {
+            spawn_detached(program, args).ok()?;
+            spawned_at = Instant::now();
+        }
         tokio::time::sleep(Duration::from_millis(3)).await;
     }
     None
+}
+
+/// Asks the daemon to shut down and waits until it has released its endpoint,
+/// so a new daemon can start right away. Returns whether one was running.
+pub async fn stop(timeout: Duration) -> bool {
+    let was_running = call("SwiftBrowse.shutdown").await.is_some();
+    let deadline = Instant::now() + timeout;
+    while was_running && !ipc::endpoint_free() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    was_running
 }
 
 // ---------- daemon core ----------

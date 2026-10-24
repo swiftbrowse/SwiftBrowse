@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Dashboard</title>
+<style>body { font: 16px system-ui, sans-serif; max-width: 520px; margin: 40px auto; }</style>
+</head>
+<body>
+<h1>Dashboard</h1>
+<p id="hello" data-testid="hello"></p>
+<p>Plan: <strong id="plan"></strong></p>
+<button id="out">Sign out</button>
+<script>
+  const user = sessionStorage.getItem('user');
+  if (!user) location.replace('login.html');
+  // Content arrives after load, like a client-rendered app.
+  setTimeout(() => {
+    document.getElementById('hello').textContent = 'Welcome, ' + user;
+    document.getElementById('plan').textContent = sessionStorage.getItem('plan');
+  }, 80);
+  document.getElementById('out').addEventListener('click', () => { sessionStorage.clear(); location.href = 'login.html'; });
+</script>
+</body>
+</html>

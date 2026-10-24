@@ -867,22 +867,43 @@ impl Backend for ChromiumBackend {
         let pt = self.call("prepareClick", json!([ref_id])).await?;
         self.worlds_at_click = self.state.lock().unwrap().worlds_created;
         let (x, y) = (pt["x"].as_f64().unwrap_or(0.0), pt["y"].as_f64().unwrap_or(0.0));
-        let dispatch = async {
-            self.send("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y, "buttons": 0 }))
-                .await?;
-            self.send(
-                "Input.dispatchMouseEvent",
-                json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 }),
-            )
-            .await?;
-            self.send(
-                "Input.dispatchMouseEvent",
-                json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1 }),
-            )
-            .await
-        };
-        // Input may have reached the page: never report a retryable kind from here.
-        dispatch.await.map(|_| ()).map_err(|e| CoreError::backend(format!("click dispatch failed: {}", e.message)))
+        // Queue move, press and release together: waiting for each acknowledgement
+        // leaves time for the page to shift the layout between press and release.
+        let events = [
+            json!({ "type": "mouseMoved", "x": x, "y": y, "buttons": 0 }),
+            json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 }),
+            json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1 }),
+        ];
+        let pending: Vec<_> =
+            events.into_iter().map(|e| self.cdp.enqueue("Input.dispatchMouseEvent", e, Some(&self.session))).collect();
+        for p in pending {
+            // Input may have reached the page: never report a retryable kind from here.
+            p.wait(CMD_TIMEOUT)
+                .await
+                .map_err(|e| CoreError::backend(format!("click dispatch failed: {}", e.message)))?;
+        }
+        // The click guard blocked a click that would have missed, before the page
+        // acted on it, so it is safe to retry. A navigation away from the page
+        // (the call fails) means the click landed.
+        if let Ok(done) = self.call("clickDone", json!([])).await {
+            if done["missed"].as_bool() == Some(true) {
+                let hit = done["hit"].as_str().unwrap_or("another element");
+                let when = if done["seen"].as_u64().unwrap_or(0) > 0 { "during" } else { "before" };
+                return Err(CoreError::new(
+                    ErrorKind::NotActionable,
+                    format!("{ref_id} moved {when} the click, which would have hit {hit}; the click was blocked"),
+                ));
+            }
+            // No mouse event arrived at all: a just-loaded page can drop input
+            // until it is ready.
+            if done["seen"].as_u64() == Some(0) {
+                return Err(CoreError::new(
+                    ErrorKind::NotActionable,
+                    "the page did not receive the click (it was not ready for input yet)",
+                ));
+            }
+        }
+        Ok(())
     }
 
     async fn fill(&mut self, ref_id: &str, value: &str) -> Result<()> {
@@ -925,6 +946,100 @@ impl Backend for ChromiumBackend {
     async fn select_option(&mut self, ref_id: &str, option: &str) -> Result<Vec<String>> {
         let v = self.call("selectOption", json!([ref_id, option])).await?;
         serde_json::from_value(v).map_err(|e| CoreError::backend(e.to_string()))
+    }
+
+    async fn hover(&mut self, ref_id: &str) -> Result<()> {
+        let pt = self.call("pointAt", json!([ref_id])).await?;
+        let (x, y) = (pt["x"].as_f64().unwrap_or(0.0), pt["y"].as_f64().unwrap_or(0.0));
+        self.send("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y, "buttons": 0 }))
+            .await
+            .map(|_| ())
+            .map_err(|e| CoreError::backend(format!("hover dispatch failed: {}", e.message)))
+    }
+
+    async fn read_text(&mut self, ref_id: &str) -> Result<String> {
+        let v = self.call("readText", json!([ref_id])).await?;
+        Ok(v.as_str().unwrap_or_default().to_string())
+    }
+
+    async fn history(&mut self, delta: i32, timeout: Duration) -> Result<NavigationInfo> {
+        #[derive(serde::Deserialize, Default)]
+        struct Doc {
+            origin: f64,
+            url: String,
+            ready: String,
+        }
+        let started = Instant::now();
+        let doc = |v: Value| serde_json::from_value::<Doc>(v).unwrap_or_default();
+        let before = doc(self.call("docState", json!([])).await?);
+        let target_url = if delta == 0 {
+            self.send("Page.reload", json!({})).await?;
+            None
+        } else {
+            let h = self.send("Page.getNavigationHistory", json!({})).await?;
+            let entries = h["entries"].as_array().cloned().unwrap_or_default();
+            let index = h["currentIndex"].as_i64().unwrap_or(0) + i64::from(delta);
+            let Some(entry) = usize::try_from(index).ok().and_then(|i| entries.get(i)) else {
+                let which = if delta < 0 { "back" } else { "forward" };
+                return Err(CoreError::new(ErrorKind::NavigationFailed, format!("no history entry to go {which} to")));
+            };
+            self.send("Page.navigateToHistoryEntry", json!({ "entryId": entry["id"] })).await?;
+            Some(s(entry, "url"))
+        };
+        // Done when a new document has loaded, or (same-document history) the URL moved.
+        loop {
+            if let Ok(v) = self.call("docState", json!([])).await {
+                let now = doc(v);
+                let new_doc = now.origin != before.origin;
+                let arrived = match &target_url {
+                    None => new_doc,
+                    Some(u) => new_doc || (now.url == *u && now.url != before.url),
+                };
+                if arrived && now.ready == "complete" {
+                    break;
+                }
+            }
+            if started.elapsed() >= timeout {
+                return Err(CoreError::new(
+                    ErrorKind::Timeout,
+                    format!("page did not load within {} ms", timeout.as_millis()),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        let render_ms = RENDER_WAIT.min(timeout.saturating_sub(started.elapsed())).as_millis() as u64;
+        let settled: Loaded = self
+            .call("settle", json!([render_ms]))
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let page = self.page_state().await?;
+        Ok(NavigationInfo {
+            url: page.url,
+            title: page.title,
+            status: None,
+            same_document: false,
+            rendered_after_load_ms: settled.rendered_after_load_ms,
+            still_empty: settled.still_empty,
+            still_changing: settled.still_changing,
+        })
+    }
+
+    async fn evaluate(&mut self, expression: &str, timeout: Duration) -> Result<Value> {
+        let r = self
+            .cdp
+            .send(
+                "Runtime.evaluate",
+                json!({ "expression": expression, "returnByValue": true, "awaitPromise": true, "userGesture": true }),
+                Some(&self.session),
+                timeout,
+            )
+            .await?;
+        if let Some(ex) = r.get("exceptionDetails") {
+            return Err(js_error(ex));
+        }
+        Ok(r["result"].get("value").cloned().unwrap_or(Value::Null))
     }
 
     async fn accessibility_tree(&mut self, max_nodes: usize) -> Result<Value> {

@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@playwright/mcp": "0.0.83",
+    "@playwright/test": "1.64.0",
     "playwright-core": "1.64.0"
   }
 }

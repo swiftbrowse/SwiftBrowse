@@ -54,6 +54,22 @@ pub trait Backend: Send {
     /// Returns the selected option values after the change.
     async fn select_option(&mut self, ref_id: &str, option: &str) -> Result<Vec<String>>;
 
+    /// Moves the mouse over the element. Same retry contract as `click`.
+    async fn hover(&mut self, _ref_id: &str) -> Result<()> {
+        Err(CoreError::unsupported("hover is not available on this backend"))
+    }
+    /// The element's full visible text, whitespace-normalized.
+    async fn read_text(&mut self, ref_id: &str) -> Result<String> {
+        Ok(self.describe(ref_id).await?.text)
+    }
+    /// Goes back (-1), forward (1) or reloads (0) and waits for the page to load.
+    async fn history(&mut self, _delta: i32, _timeout: Duration) -> Result<NavigationInfo> {
+        Err(CoreError::unsupported("history navigation is not available on this backend"))
+    }
+    async fn evaluate(&mut self, _expression: &str, _timeout: Duration) -> Result<Value> {
+        Err(CoreError::unsupported("script evaluation is not available on this backend"))
+    }
+
     async fn accessibility_tree(&mut self, _max_nodes: usize) -> Result<Value> {
         Err(CoreError::unsupported("accessibility tree is not available on this backend"))
     }

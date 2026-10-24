@@ -38,15 +38,57 @@ swiftbrowse daemon stop
 
 ## End-to-end testing
 
-A flow file is a test. Steps act on the page by role, label or text; `expect` on a step and `assert_page_state` check the outcome; `run` exits 0 when every step passes and 1 otherwise, so it drops into any CI job.
+`swiftbrowse test` is a test runner. It finds every `*.test.json` / `*.spec.json`, runs the tests in parallel (each in its own isolated browser context), retries failures, and writes list, dot, JSON, JUnit and HTML reports. A failing test keeps a screenshot, a text snapshot of the page, and the console errors and failed requests it saw.
 
 ```sh
-swiftbrowse run examples/form-signup.json   # ✓ per step, JSON report on stdout, exit code for CI
+cd examples/e2e
+swiftbrowse test tests --serve site            # 12 tests against the demo app
+swiftbrowse test -j 4 --retries 2 --junit junit.xml --html report.html
+swiftbrowse test -g @smoke --shard 1/3         # filter by title/tag, split across CI machines
+swiftbrowse test --web-server "npm run dev" --web-server-url http://localhost:3000
 ```
 
-The same steps are the MCP tools, so a flow an agent worked out interactively can be saved and replayed as a regression test. The report carries evidence per action: what changed, console errors, failed requests.
+A test file (see [`examples/e2e/tests`](examples/e2e/tests)):
 
-**Not there yet** compared with a test runner such as Playwright Test: one flow per `run` (no suite discovery, parallel workers, retries or fixtures), no JUnit/HTML reports, no traces, screenshots-on-failure or video, and Chromium only. A failing `expect` waits for the full step timeout (10 s by default) before failing.
+```json
+{
+  "name": "sign in",
+  "vars": { "email": "ada@example.com" },
+  "before_each": [ { "op": "navigate", "url": "login.html" } ],
+  "tests": [
+    { "name": "signs in", "tags": ["smoke"], "steps": [
+      { "op": "fill", "target": "Email", "value": "${email}" },
+      { "op": "fill", "target": "Password", "value": "${env.TEST_PASSWORD}" },
+      { "op": "click", "target": { "by": "role", "role": "button", "name": "Sign in" },
+        "expect": { "type": "url_contains", "value": "dashboard" } },
+      { "op": "expect", "condition": { "type": "text_equals", "target": { "by": "test_id", "id": "hello" }, "text": "Welcome, ${email}" } }
+    ] }
+  ]
+}
+```
+
+- **Steps** are the same operations as the MCP tools and `run`: `navigate`, `click`, `fill`, `type_text`, `press_key`, `select_option`, `check`, `hover`, `go_back`, `go_forward`, `reload`, `evaluate`, `wait_for`, `assert_page_state`, `get_screenshot`, … A flow an agent worked out over MCP can be saved as a test unchanged.
+- **Targets** are a string (`"Email"`: tries accessible name, label, test id, then text) or an explicit locator (`role`, `label`, `test_id`, `text`, `css`, `xpath`, with `nth`).
+- **Assertions auto-wait**: `expect` (one `condition` or several `conditions`) and `assert_page_state` retry until they pass or `--expect-timeout-ms` (5 s) runs out. Conditions: URL, title, visible/hidden, count, text visible/absent, element text equals/contains, value, enabled, checked, no console errors, no failed requests.
+- **Files**: `base_url` (relative `navigate` URLs), `vars` (`${name}`, `${env.NAME}`, overridable with `--var`), `before_each`/`after_each` (`after_each` always runs), per-test `skip`, `only`, `tags`, `retries`, `timeout_ms`. A plain `run` script (`name` + `steps`) is a one-test file.
+- **Runner options**: `-j/--workers`, `--retries` (pass on retry = flaky), `--repeat-each`, `-g/--grep`, `--grep-invert`, `--shard i/n`, `-x`/`--max-failures`, `--forbid-only`, `--list`, `--test-timeout-ms` (30 s), `--serve DIR`, `--web-server CMD`, `--output-dir`, `--reporter list|dot|json|quiet`, `--junit`, `--html`. Exit code 0 = passed, 1 = failures, 2 = bad config.
+- **Reliability built into actions**: every click waits until the target is visible, enabled, not covered and not moving, and until the page's scripts have run. It is checked again *as the mouse goes down and up*: a click that would land elsewhere because the layout shifted is blocked and retried rather than lost.
+- In the runner, `evaluate` is allowed and consequential clicks ("Delete", "Pay") need no approval: tests target test environments. Over MCP both stay off unless `--allow-evaluate` / `--no-approval` are passed.
+
+**Not there yet** compared with Playwright Test: no trace viewer or video, no code-based tests (JSON only, until the TypeScript/Python SDKs), no network mocking, file upload, multi-tab or iframe steps, no storage-state reuse for logins, no visual comparison, Chromium only.
+
+### Benchmark vs Playwright Test
+
+The same 12 tests ([`examples/e2e/tests`](examples/e2e/tests) and the idiomatic Playwright version in [`bench/e2e/specs`](bench/e2e/specs)), the same app server, the same Chromium headless-shell binary, Playwright Test 1.64.0 with `fullyParallel`. Each run is a whole CLI command, start to exit, as CI runs it; median of 5 interleaved runs on 4 CPUs (`node bench/e2e.mjs`). "First run" means no daemon was running, which is what a fresh CI job gets.
+
+| Tests | Workers | Playwright Test | SwiftBrowse | SwiftBrowse, first run | Faster by |
+|---|---|---|---|---|---|
+| 12 | 1 | 5987 ms | **2212 ms** | 2330 ms | 2.6–2.7× |
+| 12 | 4 | 4361 ms | **1153 ms** | 1263 ms | 3.5–3.8× |
+| 60 | 1 | 27464 ms | **11463 ms** | 11765 ms | 2.3–2.4× |
+| 60 | 4 | 18893 ms | **5965 ms** | 5962 ms | 3.2× |
+
+Where the time goes: Playwright Test starts Node, loads and transforms the test files, and starts a browser per worker before the first test; SwiftBrowse is one native process that attaches each test to a prepared browser context in a few milliseconds. Both suites pass 12/12 in every run. One machine, one small app: a large suite on a slow app will be dominated by the app's own time.
 
 ## The contract
 
@@ -165,9 +207,10 @@ Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse
 | Shared Rust core (`crates/core`) | contract, locators, policy, sessions, verification, recovery, reports; mock backend for deterministic tests |
 | Chromium backend (`crates/chromium`) | CDP over WebSocket, per-session process + profile, isolated-world helper, trusted input, diagnostics, screenshots, AX tree |
 | MCP server (`crates/mcp`) | stdio, protocol 2024-11-05 / 2025-03-26 / 2025-06-18, generated schemas, output bounded to 256 KB |
-| CLI (`crates/cli`) | `doctor`, `capabilities`, `run`, `snapshot`, `screenshot`, `mcp`, `daemon run/status/stop` |
+| CLI (`crates/cli`) | `doctor`, `capabilities`, `run`, `test`, `snapshot`, `screenshot`, `mcp`, `daemon run/status/stop` |
+| Test runner (`crates/cli/src/testrun.rs`) | discovery, parallel workers, retries/flaky, repeat, grep/tags, shards, skip/only, hooks, variables, base URL, static server and web-server command, list/dot/JSON/JUnit/HTML reports, failure screenshot + page snapshot |
 | Warm-browser daemon (`crates/chromium/src/daemon.rs`) | Linux, macOS, Windows; spare prepared tabs, per-client ownership, token auth, idle exit |
-| Tests | 23 core/MCP unit and engine tests, 4 real-browser integration suites, 1 signal-cleanup test and 1 daemon test (speed, isolation, refusals, cleanup) of the real binary, 1 key-mapping test |
+| Tests | 23 core/MCP unit and engine tests, 4 real-browser integration suites, 1 signal-cleanup test, 1 daemon test (speed, isolation, refusals, cleanup) and 2 test-runner tests (example suite, failures/retries/reports) of the real binary, 1 key-mapping test |
 | CI (`.github/workflows/ci.yml`) | written, **not yet run** |
 | Desktop shell (Tauri/Wry) | not started; `doctor` reports WebView availability |
 | Remote/authenticated MCP transport | not started |

@@ -42,6 +42,9 @@ pub enum Condition {
     TitleContains {
         value: String,
     },
+    TitleEquals {
+        value: String,
+    },
     /// At least one visible match (or the `nth` match is visible).
     Visible {
         target: Target,
@@ -59,6 +62,16 @@ pub enum Condition {
         text: String,
     },
     TextAbsent {
+        text: String,
+    },
+    /// The element's whole visible text, whitespace-normalized, equals `text`.
+    TextEquals {
+        target: Target,
+        text: String,
+    },
+    /// The element's visible text contains `text`.
+    TextContains {
+        target: Target,
         text: String,
     },
     ValueEquals {
@@ -193,6 +206,49 @@ pub struct SelectOptionArgs {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct HoverArgs {
+    pub target: Target,
+    #[serde(default)]
+    pub expect: Option<Condition>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CheckArgs {
+    /// A checkbox, radio button, or element with `aria-checked`.
+    pub target: Target,
+    /// The state to leave it in. Default true; false unchecks.
+    #[serde(default = "yes")]
+    pub checked: bool,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryArgs {
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluateArgs {
+    /// JavaScript expression evaluated in the page; promises are awaited and the
+    /// JSON-serializable result is returned. Disabled unless the policy allows it.
+    pub expression: String,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WaitForArgs {
     pub condition: Condition,
     #[serde(default)]
@@ -229,11 +285,17 @@ pub enum Request {
     GetAccessibilityTree(AccessibilityTreeArgs),
     FindElement(FindArgs),
     Click(ClickArgs),
+    Hover(HoverArgs),
+    Check(CheckArgs),
     Fill(FillArgs),
     TypeText(TypeTextArgs),
     PressKey(PressKeyArgs),
     SelectOption(SelectOptionArgs),
     WaitFor(WaitForArgs),
+    GoBack(HistoryArgs),
+    GoForward(HistoryArgs),
+    Reload(HistoryArgs),
+    Evaluate(EvaluateArgs),
     GetScreenshot(ScreenshotArgs),
     AssertPageState(AssertArgs),
     GetConsoleErrors(NoArgs),
@@ -250,11 +312,17 @@ impl Request {
             Request::GetAccessibilityTree(_) => "get_accessibility_tree",
             Request::FindElement(_) => "find_element",
             Request::Click(_) => "click",
+            Request::Hover(_) => "hover",
+            Request::Check(_) => "check",
             Request::Fill(_) => "fill",
             Request::TypeText(_) => "type_text",
             Request::PressKey(_) => "press_key",
             Request::SelectOption(_) => "select_option",
             Request::WaitFor(_) => "wait_for",
+            Request::GoBack(_) => "go_back",
+            Request::GoForward(_) => "go_forward",
+            Request::Reload(_) => "reload",
+            Request::Evaluate(_) => "evaluate",
             Request::GetScreenshot(_) => "get_screenshot",
             Request::AssertPageState(_) => "assert_page_state",
             Request::GetConsoleErrors(_) => "get_console_errors",
@@ -296,11 +364,17 @@ pub fn op_specs() -> Vec<OpSpec> {
         OpSpec { name: "get_accessibility_tree", description: "Bounded accessibility tree (role, name, value) from the browser.", schema: schema_of::<AccessibilityTreeArgs> },
         OpSpec { name: "find_element", description: "Resolve a locator. Fails with `ambiguous` when several elements match and no nth is given.", schema: schema_of::<FindArgs> },
         OpSpec { name: "click", description: "Click an element after checking it is visible, enabled and not covered. Pass expect to verify the outcome. Consequential actions (buy, pay, delete, ...) need approved=true.", schema: schema_of::<ClickArgs> },
+        OpSpec { name: "hover", description: "Move the mouse over an element after checking it is visible and not covered. Pass expect to verify what appears.", schema: schema_of::<HoverArgs> },
+        OpSpec { name: "check", description: "Leave a checkbox, radio or aria-checked element checked (or unchecked with checked=false), clicking only if needed, and verify the state.", schema: schema_of::<CheckArgs> },
         OpSpec { name: "fill", description: "Replace a field's value and verify the resulting value.", schema: schema_of::<FillArgs> },
         OpSpec { name: "type_text", description: "Type text key by key into the target or focused element.", schema: schema_of::<TypeTextArgs> },
         OpSpec { name: "press_key", description: "Press a key or chord, optionally on a target and with an expected outcome.", schema: schema_of::<PressKeyArgs> },
         OpSpec { name: "select_option", description: "Choose an option of a <select> by value or label and verify the selection.", schema: schema_of::<SelectOptionArgs> },
         OpSpec { name: "wait_for", description: "Wait until a condition holds or the timeout expires.", schema: schema_of::<WaitForArgs> },
+        OpSpec { name: "go_back", description: "Go back one history entry and wait for the page to load.", schema: schema_of::<HistoryArgs> },
+        OpSpec { name: "go_forward", description: "Go forward one history entry and wait for the page to load.", schema: schema_of::<HistoryArgs> },
+        OpSpec { name: "reload", description: "Reload the page and wait for it to load.", schema: schema_of::<HistoryArgs> },
+        OpSpec { name: "evaluate", description: "Run a JavaScript expression in the page and return its JSON result. Only available when the session policy allows scripts (the test runner does; MCP needs --allow-evaluate).", schema: schema_of::<EvaluateArgs> },
         OpSpec { name: "get_screenshot", description: "Save a PNG screenshot to the evidence directory and return its path.", schema: schema_of::<ScreenshotArgs> },
         OpSpec { name: "assert_page_state", description: "Check URL, title, element, text, value or diagnostics conditions. Recorded in the test report.", schema: schema_of::<AssertArgs> },
         OpSpec { name: "get_console_errors", description: "Console errors and uncaught exceptions seen in this session.", schema: schema_of::<NoArgs> },

@@ -1,0 +1,28 @@
+{
+  "name": "navigation",
+  "tests": [
+    {
+      "name": "help menu opens on hover",
+      "steps": [
+        { "op": "navigate", "url": "index.html" },
+        { "op": "expect", "condition": { "type": "hidden", "target": { "by": "role", "role": "menuitem", "name": "About" } } },
+        { "op": "hover", "target": { "by": "role", "role": "button", "name": "Help" },
+          "expect": { "type": "visible", "target": { "by": "role", "role": "menuitem", "name": "About" } } },
+        { "op": "click", "target": { "by": "role", "role": "menuitem", "name": "About" },
+          "expect": { "type": "title_equals", "value": "About" } }
+      ]
+    },
+    {
+      "name": "back and forward",
+      "steps": [
+        { "op": "navigate", "url": "index.html" },
+        { "op": "click", "target": { "by": "role", "role": "link", "name": "Sign in" },
+          "expect": { "type": "title_equals", "value": "Sign in" } },
+        { "op": "go_back" },
+        { "op": "expect", "condition": { "type": "title_equals", "value": "Todos" } },
+        { "op": "go_forward" },
+        { "op": "expect", "condition": { "type": "title_equals", "value": "Sign in" } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "name": "todos",
+  "tags": ["smoke"],
+  "before_each": [
+    { "op": "navigate", "url": "index.html" }
+  ],
+  "tests": [
+    {
+      "name": "adds an item",
+      "steps": [
+        { "op": "fill", "target": "New todo", "value": "Buy milk" },
+        { "op": "click", "target": { "by": "role", "role": "button", "name": "Add" },
+          "expect": { "type": "visible", "target": { "by": "role", "role": "checkbox", "name": "Buy milk" } } },
+        { "op": "expect", "conditions": [
+          { "type": "text_equals", "target": { "by": "test_id", "id": "count" }, "text": "1 item left" },
+          { "type": "value_equals", "target": "New todo", "value": "" }
+        ] }
+      ]
+    },
+    {
+      "name": "rejects an empty item",
+      "steps": [
+        { "op": "click", "target": { "by": "role", "role": "button", "name": "Add" } },
+        { "op": "expect", "condition": { "type": "text_visible", "text": "Write something first" } },
+        { "op": "expect", "condition": { "type": "count", "target": { "by": "css", "selector": "#list li" }, "count": 0 } }
+      ]
+    },
+    {
+      "name": "completes and filters items",
+      "steps": [
+        { "op": "fill", "target": "New todo", "value": "Write tests" },
+        { "op": "press_key", "key": "Enter" },
+        { "op": "fill", "target": "New todo", "value": "Ship it" },
+        { "op": "press_key", "key": "Enter",
+          "expect": { "type": "count", "target": { "by": "role", "role": "checkbox" }, "count": 2 } },
+        { "op": "check", "target": { "by": "role", "role": "checkbox", "name": "Write tests" } },
+        { "op": "expect", "condition": { "type": "text_equals", "target": { "by": "test_id", "id": "count" }, "text": "1 item left" } },
+        { "op": "click", "target": { "by": "role", "role": "button", "name": "Active" } },
+        { "op": "expect", "conditions": [
+          { "type": "count", "target": { "by": "role", "role": "checkbox" }, "count": 1 },
+          { "type": "visible", "target": { "by": "role", "role": "checkbox", "name": "Ship it" } }
+        ] },
+        { "op": "click", "target": { "by": "role", "role": "button", "name": "Completed", "exact": true } },
+        { "op": "expect", "condition": { "type": "checked", "target": { "by": "role", "role": "checkbox", "name": "Write tests" }, "checked": true } }
+      ]
+    },
+    {
+      "name": "deletes and clears items",
+      "steps": [
+        { "op": "fill", "target": "New todo", "value": "One" },
+        { "op": "press_key", "key": "Enter" },
+        { "op": "fill", "target": "New todo", "value": "Two" },
+        { "op": "press_key", "key": "Enter",
+          "expect": { "type": "count", "target": { "by": "role", "role": "checkbox" }, "count": 2 } },
+        { "op": "click", "target": "Delete One",
+          "expect": { "type": "count", "target": { "by": "role", "role": "checkbox" }, "count": 1 } },
+        { "op": "check", "target": { "by": "role", "role": "checkbox", "name": "Two" } },
+        { "op": "click", "target": "Clear completed",
+          "expect": { "type": "text_equals", "target": { "by": "test_id", "id": "count" }, "text": "0 items left" } }
+      ]
+    },
+    {
+      "name": "keeps items after a reload",
+      "steps": [
+        { "op": "fill", "target": "New todo", "value": "Persist me" },
+        { "op": "press_key", "key": "Enter",
+          "expect": { "type": "visible", "target": { "by": "role", "role": "checkbox", "name": "Persist me" } } },
+        { "op": "reload" },
+        { "op": "expect", "condition": { "type": "visible", "target": { "by": "role", "role": "checkbox", "name": "Persist me" } } },
+        { "op": "evaluate", "expression": "JSON.parse(localStorage.getItem('todos')).length" }
+      ]
+    }
+  ]
+}

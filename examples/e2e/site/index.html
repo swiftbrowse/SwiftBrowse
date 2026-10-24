@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Todos</title>
+<style>
+  body { font: 16px system-ui, sans-serif; max-width: 520px; margin: 40px auto; }
+  li.done span { text-decoration: line-through; color: #888; }
+  .menu { position: relative; display: inline-block; }
+  .menu [role=menu] { display: none; position: absolute; background: #fff; border: 1px solid #ccc; padding: 4px; }
+  .menu:hover [role=menu] { display: block; }
+</style>
+</head>
+<body>
+<nav>
+  <a href="index.html">Todos</a> · <a href="login.html">Sign in</a>
+  <div class="menu"><button aria-haspopup="menu">Help</button>
+    <div role="menu"><a role="menuitem" href="about.html">About</a></div></div>
+</nav>
+<h1>Todos</h1>
+<form id="add">
+  <label for="new">New todo</label>
+  <input id="new" autocomplete="off" placeholder="What needs doing?">
+  <button>Add</button>
+</form>
+<p id="error" role="alert" hidden>Write something first</p>
+<ul id="list" aria-label="Todo list"></ul>
+<p><span id="count" data-testid="count">0 items left</span>
+  <button id="clear">Clear completed</button></p>
+<div role="group" aria-label="Filter">
+  <button data-filter="all" aria-pressed="true">All</button>
+  <button data-filter="active" aria-pressed="false">Active</button>
+  <button data-filter="done" aria-pressed="false">Completed</button>
+</div>
+<script>
+  const items = JSON.parse(localStorage.getItem('todos') || '[]');
+  let filter = 'all';
+  const list = document.getElementById('list');
+  function save() { localStorage.setItem('todos', JSON.stringify(items)); }
+  function render() {
+    list.innerHTML = '';
+    items.forEach((it, i) => {
+      if (filter === 'active' && it.done) return;
+      if (filter === 'done' && !it.done) return;
+      const li = document.createElement('li');
+      li.className = it.done ? 'done' : '';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = it.done; cb.id = 'todo-' + i;
+      cb.addEventListener('change', () => { it.done = cb.checked; save(); render(); });
+      const label = document.createElement('label');
+      label.htmlFor = cb.id; label.innerHTML = '<span></span>';
+      label.firstChild.textContent = it.text;
+      const del = document.createElement('button');
+      del.textContent = 'Delete'; del.setAttribute('aria-label', 'Delete ' + it.text);
+      del.addEventListener('click', () => { items.splice(i, 1); save(); render(); });
+      li.append(cb, label, ' ', del);
+      list.append(li);
+    });
+    const left = items.filter((x) => !x.done).length;
+    document.getElementById('count').textContent = left + (left === 1 ? ' item left' : ' items left');
+    document.querySelectorAll('[data-filter]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.filter === filter)));
+  }
+  document.getElementById('add').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const input = document.getElementById('new');
+    const text = input.value.trim();
+    document.getElementById('error').hidden = !!text;
+    if (!text) return;
+    // Simulate a server round trip.
+    setTimeout(() => { items.push({ text, done: false }); input.value = ''; save(); render(); }, 120);
+  });
+  document.getElementById('clear').addEventListener('click', () => {
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].done) items.splice(i, 1);
+    save(); render();
+  });
+  document.querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', () => { filter = b.dataset.filter; render(); }));
+  render();
+</script>
+</body>
+</html>

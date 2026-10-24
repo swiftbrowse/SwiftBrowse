@@ -1,0 +1,160 @@
+{
+  "meta": {
+    "browser": "shell",
+    "chromium": "/opt/pw-browsers/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
+    "playwright_test": "1.64.0",
+    "cpus": 4,
+    "iterations": 5,
+    "node": "v22.22.0"
+  },
+  "rows": [
+    {
+      "tests": 12,
+      "workers": 1,
+      "playwright test": {
+        "median_ms": 6112,
+        "min_ms": 6067,
+        "runs": [
+          6377,
+          6087,
+          6112,
+          6456,
+          6067
+        ]
+      },
+      "swiftbrowse test": {
+        "median_ms": 2233,
+        "min_ms": 2097,
+        "runs": [
+          2326,
+          2231,
+          2233,
+          2381,
+          2097
+        ]
+      },
+      "swiftbrowse test (first run)": {
+        "median_ms": 12571,
+        "min_ms": 12514,
+        "runs": [
+          12571,
+          12614,
+          12514,
+          12633,
+          12518
+        ]
+      }
+    },
+    {
+      "tests": 12,
+      "workers": 4,
+      "playwright test": {
+        "median_ms": 4468,
+        "min_ms": 4302,
+        "runs": [
+          4468,
+          4356,
+          4561,
+          4896,
+          4302
+        ]
+      },
+      "swiftbrowse test": {
+        "median_ms": 1156,
+        "min_ms": 1100,
+        "runs": [
+          1135,
+          1156,
+          1183,
+          1194,
+          1100
+        ]
+      },
+      "swiftbrowse test (first run)": {
+        "median_ms": 11528,
+        "min_ms": 11445,
+        "runs": [
+          11560,
+          11514,
+          11528,
+          11541,
+          11445
+        ]
+      }
+    },
+    {
+      "tests": 60,
+      "workers": 1,
+      "playwright test": {
+        "median_ms": 27009,
+        "min_ms": 25975,
+        "runs": [
+          27009,
+          25975,
+          27397,
+          27826,
+          26573
+        ]
+      },
+      "swiftbrowse test": {
+        "median_ms": 11339,
+        "min_ms": 11196,
+        "runs": [
+          11339,
+          11196,
+          11727,
+          11477,
+          11290
+        ]
+      },
+      "swiftbrowse test (first run)": {
+        "median_ms": 21769,
+        "min_ms": 21503,
+        "runs": [
+          21647,
+          21503,
+          22018,
+          21769,
+          21777
+        ]
+      }
+    },
+    {
+      "tests": 60,
+      "workers": 4,
+      "playwright test": {
+        "median_ms": 18831,
+        "min_ms": 17402,
+        "runs": [
+          19268,
+          24809,
+          18582,
+          18831,
+          17402
+        ]
+      },
+      "swiftbrowse test": {
+        "median_ms": 5603,
+        "min_ms": 5392,
+        "runs": [
+          5603,
+          5809,
+          5708,
+          5487,
+          5392
+        ]
+      },
+      "swiftbrowse test (first run)": {
+        "median_ms": 15812,
+        "min_ms": 15763,
+        "runs": [
+          15772,
+          15974,
+          16139,
+          15763,
+          15812
+        ]
+      }
+    }
+  ]
+}

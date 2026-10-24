@@ -95,12 +95,38 @@ impl Locator {
 /// Selection rule: when at least one match is visible, hidden matches are
 /// ignored. Without `nth`, more than one remaining match is an `ambiguous`
 /// error; with `nth`, the zero-based match in document order is chosen.
+///
+/// A plain string is shorthand for `{"by": "auto", "query": <string>}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(from = "TargetInput")]
 pub struct Target {
     #[serde(flatten)]
     pub locator: Locator,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nth: Option<usize>,
+}
+
+/// What callers may write for a target.
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum TargetInput {
+    /// Shorthand for an `auto` locator.
+    Query(String),
+    Full {
+        #[serde(flatten)]
+        locator: Locator,
+        #[serde(default)]
+        nth: Option<usize>,
+    },
+}
+
+impl From<TargetInput> for Target {
+    fn from(t: TargetInput) -> Self {
+        match t {
+            TargetInput::Query(query) => Target { locator: Locator::Auto { query }, nth: None },
+            TargetInput::Full { locator, nth } => Target { locator, nth },
+        }
+    }
 }
 
 impl From<Locator> for Target {
@@ -135,6 +161,12 @@ mod tests {
         assert!(matches!(t.locator, Locator::Role { ref role, .. } if role == "button"));
         let v = serde_json::to_value(&t).unwrap();
         assert_eq!(v["by"], "role");
+    }
+
+    #[test]
+    fn a_string_target_is_an_auto_locator() {
+        let t: Target = serde_json::from_str(r#""Sign in""#).unwrap();
+        assert_eq!(t.locator, Locator::Auto { query: "Sign in".into() });
     }
 
     #[test]
