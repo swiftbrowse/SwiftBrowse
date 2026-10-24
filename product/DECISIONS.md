@@ -68,3 +68,9 @@
 - **Found on the way:** Ubuntu 23.10+/GitHub runners deny Chromium's sandbox to non-root users (now detected, with a relaunch fallback); `doctor` hung on Windows because `chrome.exe --version` opens a browser (now read from the install folder, with a 10 s limit on every probe); a test race exposed by tracing (fixed in both suites).
 - **Security choices:** uploads off over MCP unless a directory is allowed; saved states are 0600 files in the state directory, loaded by name only; `evaluate` stays off over MCP unless allowed.
 - **Reversibility:** two-way door (new operations and options; existing behaviour unchanged).
+
+## 2026-10-24 · Parallel tests get their own warm browsers
+- **Measured:** with 4 workers sharing the one warm daemon browser, the same steps took 9.6 s in total vs 6.4 s with a browser per test, and session start waited ~83 ms behind one-at-a-time spare tabs.
+- **Built:** up to one warm daemon per concurrently active session (`SWIFTBROWSE_DAEMONS`, default the CPU count, at most 8). A session leases the lowest free slot machine-wide through a lock file, so sequential use (one CLI command, `-j 1`, an agent) keeps reusing daemon 0 and parallel workers each get their own browser, across processes too. Each daemon keeps one prepared spare tab per connected client, prepared concurrently, and trims them when clients leave. A click that opens a tab ends its effect wait at once (popup clicks 184 → ~25 ms).
+- **Trade-off:** parallel runs keep up to N browsers warm (memory) until their daemons idle out after 10 minutes. MSRV 1.89 (std file locks).
+- **Reversibility:** two-way door (`SWIFTBROWSE_DAEMONS=1` restores a single shared browser).

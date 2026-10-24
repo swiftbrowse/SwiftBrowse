@@ -93,10 +93,13 @@ enum DaemonAction {
         idle_timeout_secs: u64,
         #[arg(long)]
         chromium: Option<PathBuf>,
+        /// Which of the side-by-side daemons to run (set by clients; 0 is the default).
+        #[arg(long, default_value_t = 0)]
+        slot: usize,
     },
-    /// Show whether a daemon is running and what it is doing.
+    /// Show whether the daemons are running and what they are doing.
     Status,
-    /// Stop the running daemon; its browser and all contexts close.
+    /// Stop every running daemon; their browsers and all contexts close.
     Stop,
 }
 
@@ -372,11 +375,12 @@ async fn run_script(path: &PathBuf, common: &Common) -> ExitCode {
 async fn daemon_command(action: DaemonAction) -> ExitCode {
     use swiftbrowse_chromium::daemon;
     match action {
-        DaemonAction::Run { idle_timeout_secs, chromium } => {
+        DaemonAction::Run { idle_timeout_secs, chromium, slot } => {
             let options = daemon::DaemonOptions {
                 executable: chromium.or_else(|| std::env::var_os("SWIFTBROWSE_CHROMIUM").map(PathBuf::from)),
                 idle_timeout: std::time::Duration::from_secs(idle_timeout_secs),
                 no_sandbox: swiftbrowse_chromium::launch::needs_no_sandbox(),
+                slot,
             };
             match daemon::run(options).await {
                 Ok(()) => std::process::exit(0),
@@ -386,19 +390,36 @@ async fn daemon_command(action: DaemonAction) -> ExitCode {
                 }
             }
         }
-        DaemonAction::Status => match daemon::call("SwiftBrowse.status").await {
-            Some(status) => {
-                print(&json!({ "running": true, "endpoint": daemon::endpoint(), "status": status }));
+        DaemonAction::Status => {
+            // Slot 0 is the default daemon; parallel sessions start more.
+            let mut daemons = Vec::new();
+            for slot in 0..daemon::max_slots() {
+                let (endpoint, status) =
+                    daemon::with_slot(slot, async { (daemon::endpoint(), daemon::call("SwiftBrowse.status").await) })
+                        .await;
+                if let Some(status) = status {
+                    daemons.push(json!({ "slot": slot, "endpoint": endpoint, "status": status }));
+                }
+            }
+            let first = daemons.iter().find(|d| d["slot"] == 0).cloned();
+            let endpoint = daemon::with_slot(0, async { daemon::endpoint() }).await;
+            print(&json!({
+                "running": first.is_some(),
+                "endpoint": endpoint,
+                "status": first.map(|d| d["status"].clone()),
+                "daemons": daemons,
+            }));
+            if daemons.is_empty() {
+                ExitCode::FAILURE
+            } else {
                 ExitCode::SUCCESS
             }
-            None => {
-                print(&json!({ "running": false, "endpoint": daemon::endpoint() }));
-                ExitCode::FAILURE
-            }
-        },
+        }
         DaemonAction::Stop => {
-            let stopped = daemon::stop(std::time::Duration::from_secs(10)).await;
-            print(&json!({ "stopped": stopped }));
+            let stops = (0..daemon::max_slots())
+                .map(|slot| daemon::with_slot(slot, daemon::stop(std::time::Duration::from_secs(10))));
+            let stopped = futures_util::future::join_all(stops).await.into_iter().filter(|s| *s).count();
+            print(&json!({ "stopped": stopped > 0, "daemons_stopped": stopped }));
             ExitCode::SUCCESS
         }
     }

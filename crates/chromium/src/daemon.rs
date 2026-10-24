@@ -50,13 +50,62 @@ fn build_id() -> String {
     format!("{}-{:08x}", env!("CARGO_PKG_VERSION"), h as u32)
 }
 
+tokio::task_local! {
+    /// The daemon slot client calls in this task talk to (see [`with_slot`]).
+    static SLOT: usize;
+}
+
+/// The slot this process serves, when it is a daemon.
+static PROCESS_SLOT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Several warm daemons can run side by side, one browser each, so parallel
+/// sessions don't share a browser's main thread. Slot 0 is the default daemon;
+/// a process takes the lowest free slot for each concurrent session.
+fn current_slot() -> usize {
+    SLOT.try_with(|s| *s).unwrap_or_else(|_| PROCESS_SLOT.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Runs `f` with client calls (connect, status, stop, …) aimed at daemon `slot`.
+pub async fn with_slot<F: std::future::Future>(slot: usize, f: F) -> F::Output {
+    SLOT.scope(slot, f).await
+}
+
+/// Leases the lowest daemon slot no other session on this machine (of this
+/// user) holds, by locking `slot-<n>.lease`; the lock goes with the returned
+/// file, and the OS releases it if the process dies. `None` when all are taken.
+pub fn lease_slot() -> Option<(usize, std::fs::File)> {
+    let dir = state_dir();
+    private_dir(&dir).ok()?;
+    let tag = build_id();
+    (0..max_slots()).find_map(|slot| {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(format!("slot-{tag}-{slot}.lease")))
+            .ok()?;
+        file.try_lock().ok().map(|_| (slot, file))
+    })
+}
+
+/// How many daemons may run: `SWIFTBROWSE_DAEMONS`, else the CPU count (at most 8).
+pub fn max_slots() -> usize {
+    std::env::var("SWIFTBROWSE_DAEMONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(2, |n| n.get()))
+        .clamp(1, 8)
+}
+
 pub fn endpoint() -> String {
+    let slot = current_slot();
+    let suffix = if slot == 0 { String::new() } else { format!("-{slot}") };
     if let Some(p) = std::env::var_os(ENV_SOCKET) {
-        return p.to_string_lossy().into_owned();
+        return format!("{}{suffix}", p.to_string_lossy());
     }
     #[cfg(unix)]
     {
-        state_dir().join(format!("daemon-{}.sock", build_id())).display().to_string()
+        state_dir().join(format!("daemon-{}{suffix}.sock", build_id())).display().to_string()
     }
     #[cfg(windows)]
     {
@@ -65,7 +114,7 @@ pub fn endpoint() -> String {
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
-        format!(r"\\.\pipe\swiftbrowse-{user}-{}", build_id())
+        format!(r"\\.\pipe\swiftbrowse-{user}-{}{suffix}", build_id())
     }
 }
 
@@ -416,6 +465,8 @@ pub struct DaemonOptions {
     pub executable: Option<PathBuf>,
     pub idle_timeout: Duration,
     pub no_sandbox: bool,
+    /// Which of the side-by-side daemons this is (0 is the default one).
+    pub slot: usize,
 }
 
 enum Route {
@@ -432,8 +483,10 @@ struct State {
     session_owner: HashMap<String, u64>,
     target_owner: HashMap<String, u64>,
     context_owner: HashMap<String, u64>,
-    spare: Option<(String, String, String)>,
-    spare_pending: bool,
+    /// Prepared tabs (context, target, session), oldest first.
+    spares: std::collections::VecDeque<(String, String, String)>,
+    /// Spares being prepared right now.
+    spares_pending: usize,
     claim_waiters: Vec<(u64, Value)>,
     last_activity: Option<Instant>,
     sessions_served: u64,
@@ -482,48 +535,59 @@ impl Daemon {
         }
     }
 
-    /// Keeps one spare tab ready in a fresh context ("refresh" after each claim).
+    /// Keeps spare tabs ready, each in a fresh context ("refresh" after each
+    /// claim): one per connected client (at least one, at most `MAX_SPARES`)
+    /// plus one per waiting claim, so parallel test workers never queue behind
+    /// one another's tab creation. Spares are prepared concurrently.
     fn refill_spare(&self) {
-        {
+        const MAX_SPARES: usize = 8;
+        let missing = {
             let mut st = self.state.lock().unwrap();
-            if st.spare.is_some() || st.spare_pending {
-                return;
-            }
-            st.spare_pending = true;
-        }
-        let d = self.clone();
-        tokio::spawn(async move {
-            let made = async {
-                let ctx = d.internal("Target.createBrowserContext", json!({})).await?;
-                let ctx = ctx["browserContextId"].as_str().unwrap_or_default().to_string();
-                let target =
-                    d.internal("Target.createTarget", json!({ "url": "about:blank", "browserContextId": ctx })).await?;
-                let target = target["targetId"].as_str().unwrap_or_default().to_string();
-                // Attach and set the session up now, so the client that claims it
-                // can navigate straight away.
-                let attached =
-                    d.internal("Target.attachToTarget", json!({ "targetId": target, "flatten": true })).await?;
-                let session = attached["sessionId"].as_str().unwrap_or_default().to_string();
-                let setup = crate::session_setup(swiftbrowse_core::SessionOptions::default().viewport);
-                let replies =
-                    futures_util::future::join_all(setup.into_iter().map(|(m, p)| d.internal_on(Some(&session), m, p)))
-                        .await;
-                replies.into_iter().collect::<Result<Vec<_>>>()?;
-                Ok::<_, CoreError>((ctx, target, session))
-            }
-            .await;
-            let waiters = {
-                let mut st = d.state.lock().unwrap();
-                st.spare_pending = false;
-                if let Ok(spare) = made {
-                    st.spare = Some(spare);
+            let want = st.clients.len().clamp(1, MAX_SPARES) + st.claim_waiters.len();
+            let have = st.spares.len() + st.spares_pending;
+            let missing = want.saturating_sub(have).min(MAX_SPARES);
+            st.spares_pending += missing;
+            missing
+        };
+        for _ in 0..missing {
+            let d = self.clone();
+            tokio::spawn(async move {
+                let made = d.prepare_spare().await;
+                let ok = made.is_ok();
+                let waiter = {
+                    let mut st = d.state.lock().unwrap();
+                    st.spares_pending -= 1;
+                    if let Ok(spare) = made {
+                        st.spares.push_back(spare);
+                    }
+                    (!st.claim_waiters.is_empty()).then(|| st.claim_waiters.remove(0))
+                };
+                match waiter {
+                    Some((client, id)) if ok => d.claim(client, id),
+                    // No spare to give: the client makes its own context and tab.
+                    Some((client, id)) => d.reply(client, json!({ "id": id, "result": {} })),
+                    None => {}
                 }
-                std::mem::take(&mut st.claim_waiters)
-            };
-            for (client, id) in waiters {
-                d.claim(client, id);
-            }
-        });
+            });
+        }
+    }
+
+    /// A tab in a fresh context, attached and set up, so the client that claims
+    /// it can navigate straight away.
+    async fn prepare_spare(&self) -> Result<(String, String, String)> {
+        let ctx = self.internal("Target.createBrowserContext", json!({})).await?;
+        let ctx = ctx["browserContextId"].as_str().unwrap_or_default().to_string();
+        let target =
+            self.internal("Target.createTarget", json!({ "url": "about:blank", "browserContextId": ctx })).await?;
+        let target = target["targetId"].as_str().unwrap_or_default().to_string();
+        let attached = self.internal("Target.attachToTarget", json!({ "targetId": target, "flatten": true })).await?;
+        let session = attached["sessionId"].as_str().unwrap_or_default().to_string();
+        let setup = crate::session_setup(swiftbrowse_core::SessionOptions::default().viewport);
+        let replies =
+            futures_util::future::join_all(setup.into_iter().map(|(m, p)| self.internal_on(Some(&session), m, p)))
+                .await;
+        replies.into_iter().collect::<Result<Vec<_>>>()?;
+        Ok((ctx, target, session))
     }
 
     fn reply(&self, client: u64, msg: Value) {
@@ -538,7 +602,7 @@ impl Daemon {
             if !st.clients.contains_key(&client) {
                 return;
             }
-            match st.spare.take() {
+            match st.spares.pop_front() {
                 Some((ctx, target, session)) => {
                     st.context_owner.insert(ctx.clone(), client);
                     st.target_owner.insert(target.clone(), client);
@@ -546,11 +610,13 @@ impl Daemon {
                     st.sessions_served += 1;
                     Some((ctx, target, session))
                 }
-                None if st.spare_pending => {
+                None => {
+                    // Wait for the next spare; refill starts one for this claim.
                     st.claim_waiters.push((client, id.clone()));
+                    drop(st);
+                    self.refill_spare();
                     return;
                 }
-                None => None,
             }
         };
         let result = match &taken {
@@ -584,7 +650,8 @@ impl Daemon {
                     "pid": std::process::id(),
                     "clients": st.clients.len(),
                     "sessions_served": st.sessions_served,
-                    "spare_ready": st.spare.is_some(),
+                    "spare_ready": !st.spares.is_empty(),
+                    "spares": st.spares.len(),
                     "uptime_ms": self.started.elapsed().as_millis() as u64,
                     "browser": *self.version.lock().unwrap(),
                 });
@@ -727,10 +794,17 @@ impl Daemon {
             st.session_owner.retain(|_, c| *c != client);
             st.target_owner.retain(|_, c| *c != client);
             st.claim_waiters.retain(|(c, _)| *c != client);
-            let mine: Vec<String> =
+            let mut mine: Vec<String> =
                 st.context_owner.iter().filter(|(_, c)| **c == client).map(|(k, _)| k.clone()).collect();
             st.context_owner.retain(|_, c| *c != client);
             st.last_activity = Some(Instant::now());
+            // Fewer clients need fewer spares: close the extra ones.
+            let keep = st.clients.len().max(1);
+            while st.spares.len() > keep {
+                if let Some((ctx, _, _)) = st.spares.pop_back() {
+                    mine.push(ctx);
+                }
+            }
             mine
         };
         for ctx in contexts {
@@ -817,6 +891,7 @@ async fn browser_link(
 
 /// Runs the daemon until idle timeout, browser exit or shutdown request.
 pub async fn run(options: DaemonOptions) -> Result<()> {
+    PROCESS_SLOT.store(options.slot, std::sync::atomic::Ordering::Relaxed);
     let dir = state_dir();
     private_dir(&dir).map_err(|e| CoreError::backend(format!("cannot prepare {}: {e}", dir.display())))?;
     let Some(mut listener) = ipc::Listener::bind()? else {

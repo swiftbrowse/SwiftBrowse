@@ -4,6 +4,11 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './specs',
+  // The saved-login setup runs first; the other tests depend on it.
+  projects: [
+    { name: 'setup', testMatch: /.*\.setup\.mjs/ },
+    { name: 'tests', testMatch: /.*\.spec\.mjs/, dependencies: ['setup'] },
+  ],
   fullyParallel: true,
   retries: 0,
   reporter: 'dot',

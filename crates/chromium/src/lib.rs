@@ -77,10 +77,21 @@ impl BackendFactory for ChromiumFactory {
 
     async fn launch(&self, options: &SessionOptions) -> Result<Box<dyn Backend>> {
         if let (DaemonMode::Auto { program, args }, true) = (&self.daemon, options.headless) {
-            let spawn = (program.clone(), args.clone());
-            if let Some((r, w)) = daemon::connect_or_spawn(Some(&spawn)).await {
+            // Concurrent sessions of this process each get their own warm daemon
+            // (browser); sequential ones keep reusing slot 0.
+            let slot = SlotGuard::acquire();
+            let mut args = args.clone();
+            if slot.0 > 0 {
+                args.extend(["--slot".to_string(), slot.0.to_string()]);
+            }
+            let spawn = (program.clone(), args);
+            let connected = daemon::with_slot(slot.0, daemon::connect_or_spawn(Some(&spawn))).await;
+            if let Some((r, w)) = connected {
                 match ChromiumBackend::attach_daemon(r, w, options).await {
-                    Ok(backend) => return Ok(Box::new(backend)),
+                    Ok(mut backend) => {
+                        backend.slot = Some(slot);
+                        return Ok(Box::new(backend));
+                    }
                     Err(e) => trace_event(&format!("daemon attach failed, launching instead: {}", e.message)),
                 }
             }
@@ -104,6 +115,20 @@ impl BackendFactory for ChromiumFactory {
             )
             .await?,
         ))
+    }
+}
+
+/// A daemon slot held by one session, machine-wide (see [`daemon::lease_slot`]);
+/// released with the lease file when dropped.
+struct SlotGuard(usize, #[allow(dead_code)] Option<std::fs::File>);
+
+impl SlotGuard {
+    /// The lowest free slot; when every slot is busy, sessions share the last one.
+    fn acquire() -> Self {
+        match daemon::lease_slot() {
+            Some((slot, lease)) => SlotGuard(slot, Some(lease)),
+            None => SlotGuard(daemon::max_slots() - 1, None),
+        }
     }
 }
 
@@ -214,10 +239,14 @@ pub struct ChromiumBackend {
     profile: Option<tempfile::TempDir>,
     /// The browser context this session owns inside the shared daemon browser.
     daemon_context: Option<String>,
+    /// The daemon slot this session holds (freed with the backend).
+    slot: Option<SlotGuard>,
     version: Option<String>,
     headless_shell: bool,
     /// Document generation when the last click was dispatched.
     worlds_at_click: u64,
+    /// Number of tabs when the last click was dispatched.
+    tabs_at_click: usize,
     headless: bool,
     no_sandbox: bool,
 }
@@ -360,8 +389,10 @@ impl ChromiumBackend {
             child: None,
             profile: None,
             daemon_context: None,
+            slot: None,
             version: None,
             worlds_at_click: 0,
+            tabs_at_click: 0,
             headless_shell: false,
             headless: options.headless,
             no_sandbox: false,
@@ -1352,6 +1383,7 @@ impl Backend for ChromiumBackend {
     async fn click(&mut self, ref_id: &str) -> Result<()> {
         let pt = self.call("prepareClick", json!([ref_id])).await?;
         self.worlds_at_click = self.tab.state.lock().unwrap().worlds_created;
+        self.tabs_at_click = self.shared.pages.lock().unwrap().len();
         let (ox, oy) = self.frame_offset().await?;
         let (x, y) = (pt["x"].as_f64().unwrap_or(0.0) + ox, pt["y"].as_f64().unwrap_or(0.0) + oy);
         // Queue move, press and release together: waiting for each acknowledgement
@@ -2084,7 +2116,20 @@ impl Backend for ChromiumBackend {
         if new_document(self) {
             return Ok(Some(vec!["navigated".into()]));
         }
-        match self.call("clickEffect", json!([max.as_millis() as u64])).await {
+        // A click that opens a tab (popup, target=_blank) leaves this page as it
+        // was: the new tab is the effect, so stop waiting the moment it appears.
+        let shared = self.shared.clone();
+        let tabs_before = self.tabs_at_click;
+        let opened = async move {
+            while shared.pages.lock().unwrap().len() <= tabs_before {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        let effect = tokio::select! {
+            r = self.call("clickEffect", json!([max.as_millis() as u64])) => r,
+            _ = opened => return Ok(Some(vec!["opened_tab".into()])),
+        };
+        match effect {
             Ok(_) if new_document(self) => Ok(Some(vec!["navigated".into()])),
             Ok(v) => Ok(serde_json::from_value(v).ok().flatten()),
             Err(e) if context_gone(&e) || new_document(self) => Ok(Some(vec!["navigated".into()])),

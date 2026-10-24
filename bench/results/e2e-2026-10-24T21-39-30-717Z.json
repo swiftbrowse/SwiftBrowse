@@ -1,0 +1,44 @@
+{
+  "meta": {
+    "browser": "shell",
+    "chromium": "/opt/pw-browsers/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
+    "playwright_test": "1.64.0",
+    "cpus": 4,
+    "iterations": 1,
+    "node": "v22.22.0"
+  },
+  "rows": [
+    {
+      "tests": 29,
+      "workers": 4,
+      "playwright test": {
+        "median_ms": 7137,
+        "min_ms": 7137,
+        "runs": [
+          7137
+        ]
+      },
+      "swiftbrowse test": {
+        "median_ms": 2456,
+        "min_ms": 2456,
+        "runs": [
+          2456
+        ]
+      },
+      "swiftbrowse sdk": {
+        "median_ms": 3309,
+        "min_ms": 3309,
+        "runs": [
+          3309
+        ]
+      },
+      "swiftbrowse test (first run)": {
+        "median_ms": 2693,
+        "min_ms": 2693,
+        "runs": [
+          2693
+        ]
+      }
+    }
+  ]
+}
