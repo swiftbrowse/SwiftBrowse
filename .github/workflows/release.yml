@@ -1,9 +1,13 @@
 name: release
 
-# Push a tag `v<version>` to publish: binaries for five platforms, the npm packages
-# (swiftbrowse + swiftbrowse-<platform>) and the PyPI wheels, plus a GitHub release.
-# Run it by hand with dry_run (the default) to build and check everything without
-# publishing anything.
+# Publishes binaries for five platforms, the npm packages (swiftbrowse +
+# swiftbrowse-<platform>) and the PyPI wheels, and creates the GitHub release.
+# Two ways to release:
+#   - push a tag `v<version>`;
+#   - run it by hand with dry_run off and `version` set to the version to release;
+#     the run creates the `v<version>` tag on the commit it built.
+# By hand with dry_run on (the default), it builds and checks everything and
+# publishes nothing.
 
 on:
   push:
@@ -14,6 +18,10 @@ on:
         description: Build and check everything, publish nothing
         type: boolean
         default: true
+      version:
+        description: To publish (dry_run off), the exact version being released, e.g. 0.1.0
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,8 +45,10 @@ jobs:
             echo "::error::versions differ between Cargo.toml, sdk/typescript/package.json and sdk/python/pyproject.toml"
             exit 1
           fi
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" != "true" ]; then
-            echo "::error::publishing happens only from a tag: git tag v$cargo_version && git push origin v$cargo_version"
+          # Publishing by hand needs the version typed in, so it can't happen by accident.
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" != "true" ] \
+             && [ "${{ inputs.version }}" != "$cargo_version" ]; then
+            echo "::error::to publish by hand, set version to $cargo_version (got '${{ inputs.version }}')"
             exit 1
           fi
           if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$cargo_version" ]; then
@@ -146,10 +156,12 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
         run: python -m twine upload --skip-existing --non-interactive dist/wheels/*
+      # Also creates the tag when the run was started by hand.
       - name: GitHub release
-        if: github.ref_type == 'tag'
+        if: env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.version.outputs.version) }}
         run: |
           mkdir -p dist/archives
           for dir in bins/*; do
@@ -161,5 +173,5 @@ jobs:
             fi
           done
           (cd dist/archives && sha256sum * > SHA256SUMS)
-          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "SwiftBrowse $VERSION" --generate-notes dist/archives/*
+          gh release view "$TAG" > /dev/null 2>&1 \
+            || gh release create "$TAG" --target "$GITHUB_SHA" --title "SwiftBrowse $VERSION" --generate-notes dist/archives/*
