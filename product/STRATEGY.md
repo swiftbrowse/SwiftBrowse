@@ -11,6 +11,6 @@
 **North Star**: verified agent tasks completed per day, i.e. tasks whose outcome SwiftBrowse confirmed.
 Inputs: task success rate · false-success rate (target 0) · context bytes per task · tool calls per task · time per task.
 
-**Now**: beat Playwright MCP on the agent task benchmark, published with its method. **Next**: close the remaining Playwright Test gaps that block real suites (storage-state login reuse, network mocking, file upload, frames/tabs, traces); TypeScript/Python SDKs so tests can be code; remote authenticated MCP. **Later**: desktop shell.
+**Now**: beat Playwright MCP on the agent task benchmark, published with its method. **Next**: publish the SDKs (npm, PyPI) with prebuilt binaries; re-run the Playwright Test benchmark with code-based suites; DOM snapshots in traces; remote authenticated MCP. **Later**: desktop shell.
 
 **Non-goals (now)**: cross-browser testing (Chromium only); parity with Playwright Test's full feature set before the basics above.

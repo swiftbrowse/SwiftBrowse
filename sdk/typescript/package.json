@@ -1,0 +1,16 @@
+{
+  "name": "swiftbrowse",
+  "version": "0.1.0",
+  "description": "The AI browser for browser automation and end-to-end testing: JavaScript/TypeScript SDK",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.js" } },
+  "files": ["src"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "test": "node --test"
+  }
+}

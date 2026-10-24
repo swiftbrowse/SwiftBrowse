@@ -36,6 +36,17 @@ jobs:
       - run: npx -y playwright@1.64.0 install --with-deps chromium chromium-headless-shell ffmpeg
       - run: cargo run -q -p swiftbrowse-cli -- doctor
       - run: cargo test --workspace
+      # The SDKs are generated from the engine's schemas: they must match it.
+      - run: |
+          node sdk/typescript/scripts/generate.mjs target/debug/swiftbrowse
+          python3 sdk/python/scripts/generate.py target/debug/swiftbrowse
+          git diff --exit-code sdk
+      - run: node --test
+        working-directory: sdk/typescript
+      - run: npx -y -p typescript@5.6.3 tsc -p test/tsconfig.json
+        working-directory: sdk/typescript
+      - run: python3 -m unittest discover -s tests -v
+        working-directory: sdk/python
 
   test-other:
     strategy:

@@ -1,3 +1,5 @@
 target/
 bench/node_modules/
 test-results/
+__pycache__/
+*.egg-info/

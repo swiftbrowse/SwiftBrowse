@@ -61,3 +61,10 @@
 - **Result:** 2.3–3.8× faster than Playwright Test on the same 12/60-test suite and binary, first run included (README table, `bench/e2e.mjs`).
 - **Not done:** traces/video, network mocking, uploads, frames/tabs, storage-state reuse, code-based tests (needs the SDKs), other browsers.
 - **Reversibility:** two-way door (new command and operations; existing ones unchanged).
+
+## 2026-10-24 · Close the Playwright Test gaps
+- **Asked for:** traces and video, network mocking, file upload, frames and tabs, saved logins, tests in code (SDKs).
+- **Built:** tabs (`new_tab`, `switch_tab` that waits for popups, `close_tab`) and frames (`switch_frame` into same-site, cross-site and nested iframes); `upload_file`, limited to allowed directories; `route`/`unroute`/`get_requests` and a `request_seen` condition; `save_storage_state`/`load_storage_state` in Playwright's format with `*.setup.json` setup tests; `--trace` (self-contained trace.html) and `--video` (WebM via ffmpeg); `swiftbrowse sdk` with TypeScript and Python SDKs generated from the operation schemas.
+- **Found on the way:** Ubuntu 23.10+/GitHub runners deny Chromium's sandbox to non-root users (now detected, with a relaunch fallback); `doctor` hung on Windows because `chrome.exe --version` opens a browser (now read from the install folder, with a 10 s limit on every probe); a test race exposed by tracing (fixed in both suites).
+- **Security choices:** uploads off over MCP unless a directory is allowed; saved states are 0600 files in the state directory, loaded by name only; `evaluate` stays off over MCP unless allowed.
+- **Reversibility:** two-way door (new operations and options; existing behaviour unchanged).

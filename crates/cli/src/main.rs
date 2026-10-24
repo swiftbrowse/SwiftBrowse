@@ -1,4 +1,5 @@
 mod doctor;
+mod sdk;
 mod testrun;
 
 use std::path::PathBuf;
@@ -61,6 +62,18 @@ enum Command {
         /// Do not launch the default session's browser until the first tool call.
         #[arg(long)]
         no_prewarm: bool,
+        #[command(flatten)]
+        common: Common,
+    },
+    /// Serve the SDK protocol (JSON lines on stdin/stdout) for the TypeScript and Python SDKs.
+    Sdk {
+        /// Test defaults, as in `swiftbrowse test`: no approval for consequential
+        /// clicks, `evaluate` allowed, uploads from the working directory.
+        #[arg(long)]
+        test_defaults: bool,
+        /// Print every operation with its JSON schema and exit (for code generation).
+        #[arg(long)]
+        schema: bool,
         #[command(flatten)]
         common: Common,
     },
@@ -240,6 +253,24 @@ async fn main() -> ExitCode {
             run_script(&script, &common).await
         }
         Command::Test(args) => testrun::run(*args).await,
+        Command::Sdk { test_defaults, schema, mut common } => {
+            if schema {
+                let ops: Vec<Value> = swiftbrowse_core::request::op_specs()
+                    .into_iter()
+                    .map(|s| json!({ "name": s.name, "description": s.description, "schema": (s.schema)() }))
+                    .collect();
+                print(&json!({ "protocol": sdk::PROTOCOL, "ops": ops }));
+                return ExitCode::SUCCESS;
+            }
+            if test_defaults {
+                common.no_approval = true;
+                common.allow_evaluate = true;
+                if common.upload_dirs.is_empty() {
+                    common.upload_dirs.push(PathBuf::from("."));
+                }
+            }
+            sdk::serve(common).await
+        }
     }
 }
 

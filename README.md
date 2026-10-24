@@ -1,8 +1,8 @@
 # SwiftBrowse
 
-**The AI browser for browser automation and end-to-end testing.** One contract across MCP, CLI and (planned) SDKs: agents drive it through MCP, and the same steps run as a CI test from a JSON flow. Rust core, Chromium backend over the DevTools Protocol.
+**The AI browser for browser automation and end-to-end testing.** One contract across MCP, CLI and the TypeScript and Python SDKs: agents drive it through MCP, and the same steps run as CI tests, written as JSON flows or in code. Rust core, Chromium backend over the DevTools Protocol.
 
-> **Status: Phase 1 of the product specification roadmap, plus the MCP server and CLI from Phase 4.** The cloud/headless Chromium path works and is tested. The Tauri/Wry desktop shell and the TypeScript/Python SDKs are **not started**. See [What exists](#what-exists).
+> **Status: Phase 1 of the product specification roadmap, plus the MCP server and CLI from Phase 4.** The cloud/headless Chromium path works and is tested. The TypeScript and Python SDKs work against the same engine. The Tauri/Wry desktop shell is **not started**. See [What exists](#what-exists).
 
 ## Quick start
 
@@ -78,7 +78,7 @@ A test file (see [`examples/e2e/tests`](examples/e2e/tests)):
 - `upload_file` only reads from allowed directories: in the runner, the working directory and the test file's directory (paths are relative to the test file); over MCP, none unless `--allow-upload-dir DIR`.
 - In the runner, `evaluate` is allowed and consequential clicks ("Delete", "Pay") need no approval: tests target test environments. Over MCP both stay off unless `--allow-evaluate` / `--no-approval` are passed.
 
-**Not there yet** compared with Playwright Test: traces hold screenshots and text, not a live DOM snapshot; no code-based tests (JSON only, until the TypeScript/Python SDKs), no visual comparison, Chromium only.
+**Not there yet** compared with Playwright Test: traces hold screenshots and text, not a live DOM snapshot; no visual comparison, no fixtures or reporters inside the SDKs (use your test framework's), Chromium only.
 
 ### Benchmark vs Playwright Test
 
@@ -92,6 +92,40 @@ The same 12 tests ([`examples/e2e/tests`](examples/e2e/tests) and the idiomatic 
 | 60 | 4 | 18893 ms | **5965 ms** | 5962 ms | 3.2× |
 
 Where the time goes: Playwright Test starts Node, loads and transforms the test files, and starts a browser per worker before the first test; SwiftBrowse is one native process that attaches each test to a prepared browser context in a few milliseconds. Both suites pass 12/12 in every run. One machine, one small app: a large suite on a slow app will be dominated by the app's own time.
+
+## Tests in code: TypeScript and Python SDKs
+
+The SDKs drive the same engine through `swiftbrowse sdk` (JSON lines over stdin/stdout). Their methods and types are **generated from the engine's operation schemas** (CI fails if they drift), so every operation above is a method: required arguments in order, the rest as options. A failed action or `expect` throws, so any test framework reports it. Each session is isolated, sessions run concurrently, and they attach to the warm daemon.
+
+```ts
+// node --test   (or Vitest, Jest, …) — sdk/typescript, zero dependencies, typed
+import { test } from 'node:test';
+import { launch } from 'swiftbrowse';
+
+test('signs in', async () => {
+  const browser = await launch();
+  const page = await browser.newSession();
+  await page.navigate('http://localhost:3000/login');
+  await page.fill('Email', 'ada@example.com');
+  await page.click({ by: 'role', role: 'button', name: 'Sign in' }, { expect: { type: 'url_contains', value: '/dashboard' } });
+  await page.expect({ type: 'text_visible', text: 'Welcome, Ada' });
+  await browser.close();
+});
+```
+
+```python
+# pytest or unittest — sdk/python, standard library only
+from swiftbrowse import launch
+
+def test_signs_in():
+    with launch() as browser, browser.new_session() as page:
+        page.navigate("http://localhost:3000/login")
+        page.fill("Email", "ada@example.com")
+        page.click({"by": "role", "role": "button", "name": "Sign in"}, expect={"type": "url_contains", "value": "/dashboard"})
+        page.expect({"type": "text_visible", "text": "Welcome, Ada"})
+```
+
+`launch()` uses test defaults (no approval prompts, `evaluate` allowed, uploads from the working directory); `launch({ testDefaults: false })` / `launch(test_defaults=False)` keeps the agent-safe policy. Tests: [`sdk/typescript/test`](sdk/typescript/test), [`sdk/python/tests`](sdk/python/tests).
 
 ## The contract
 
@@ -217,7 +251,7 @@ Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse
 | CI (`.github/workflows/ci.yml`) | written, **not yet run** |
 | Desktop shell (Tauri/Wry) | not started; `doctor` reports WebView availability |
 | Remote/authenticated MCP transport | not started |
-| TypeScript / Python SDKs | not started |
+| TypeScript / Python SDKs (`sdk/`) | over `swiftbrowse sdk`; methods and types generated from the operation schemas; tested with node:test, tsc and unittest |
 | Downloads, visual grounding | reported `unsupported` in capabilities |
 
 Known limitations: actions work in one frame at a time (`switch_frame`), CSS doesn't pierce shadow roots, and consequential-action detection uses text patterns, not semantics. Set `SWIFTBROWSE_TRACE=1` for launch and navigation phase timings.
