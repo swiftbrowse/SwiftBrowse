@@ -1,0 +1,2 @@
+# Test fixtures are uploaded byte for byte: never convert their line endings.
+examples/e2e/tests/fixtures/** -text

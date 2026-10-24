@@ -1114,7 +1114,7 @@ pub async fn run(args: TestArgs) -> ExitCode {
         return config_error(format!("cannot create {}: {e}", args.output_dir.display()));
     }
     let _ = std::fs::write(args.output_dir.join(MARKER), "");
-    let output_dir = std::fs::canonicalize(&args.output_dir).unwrap_or(args.output_dir.clone());
+    let output_dir = std::fs::canonicalize(&args.output_dir).map(plain_path).unwrap_or(args.output_dir.clone());
 
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     let workers = args.workers.unwrap_or((cpus / 2).max(1)).max(1);
@@ -1410,6 +1410,15 @@ fn junit(results: &[TestResult], wall_ms: u64) -> String {
     }
     out.push_str("</testsuites>\n");
     out
+}
+
+/// Drops Windows' verbatim prefix (`\\?\C:\…`) that `canonicalize` adds, for
+/// paths people read and click.
+fn plain_path(p: PathBuf) -> PathBuf {
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => p,
+    }
 }
 
 /// `to` relative to the directory `from`, for links between report files.
