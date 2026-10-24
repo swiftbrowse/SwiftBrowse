@@ -46,6 +46,7 @@ pub fn save(frames: &[Frame], end: f64, dir: &Path, stem: &str) -> Result<Record
         std::fs::write(out.join("frames.txt"), index).map_err(io)?;
         return Ok(Recording::Frames { dir: out, count: frames.len() });
     };
+    let codec = webm_encoder(&ffmpeg)?;
     let path = dir.join(format!("{stem}.webm"));
     let (w, h) = jpeg_size(&frames[0].jpeg).unwrap_or((800, 500));
     // Even dimensions for the encoder; gray padding like Playwright's.
@@ -53,7 +54,7 @@ pub fn save(frames: &[Frame], end: f64, dir: &Path, stem: &str) -> Result<Record
     let mut child = Command::new(&ffmpeg)
         .args(["-loglevel", "error", "-f", "image2pipe", "-avioflags", "direct", "-fpsprobesize", "0"])
         .args(["-probesize", "32", "-analyzeduration", "0", "-c:v", "mjpeg", "-i", "pipe:0", "-y", "-an"])
-        .args(["-r", &FPS.to_string(), "-c:v", "vp8", "-qmin", "0", "-qmax", "50", "-crf", "8"])
+        .args(["-r", &FPS.to_string(), "-c:v", codec, "-qmin", "0", "-qmax", "50", "-crf", "8"])
         .args(["-deadline", "realtime", "-speed", "8", "-b:v", "1M", "-threads", "1"])
         .args(["-vf", &format!("pad={w}:{h}:0:0:gray,crop={w}:{h}:0:0")])
         .arg(&path)
@@ -87,6 +88,29 @@ pub fn save(frames: &[Frame], end: f64, dir: &Path, stem: &str) -> Result<Record
         )));
     }
     Ok(Recording::Video(path))
+}
+
+/// A WebM video encoder this ffmpeg has: Playwright's builds ship VP8 (up to
+/// 1012) or VP9 (1013 on), system builds usually both.
+fn webm_encoder(ffmpeg: &Path) -> Result<&'static str> {
+    let out = Command::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| CoreError::backend(format!("cannot run ffmpeg ({}): {e}", ffmpeg.display())))?;
+    let list = String::from_utf8_lossy(&out.stdout);
+    let has = |name: &str| list.lines().any(|l| l.split_whitespace().nth(1) == Some(name));
+    if has("libvpx-vp9") {
+        Ok("libvpx-vp9")
+    } else if has("libvpx") {
+        Ok("libvpx")
+    } else {
+        Err(CoreError::backend(format!(
+            "{} has no WebM encoder (libvpx-vp9 or libvpx); install Playwright's: npx playwright install ffmpeg",
+            ffmpeg.display()
+        )))
+    }
 }
 
 /// Width and height from a JPEG's start-of-frame marker.

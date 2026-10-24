@@ -50,6 +50,8 @@ jobs:
 
   test-other:
     strategy:
+      # One OS failing must not cancel the others: each is evidence.
+      fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
