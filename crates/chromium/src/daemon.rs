@@ -288,9 +288,34 @@ mod ipc {
     /// Starts the daemon detached from the caller's console.
     pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
         use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::Foundation::{GetHandleInformation, SetHandleInformation, HANDLE_FLAG_INHERIT};
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP).spawn().map(|_| ())
+        // A child inherits every inheritable handle, not only its stdio. Our own
+        // stdout may be a pipe someone reads until it closes (a test harness, a
+        // script capturing output): the long-lived daemon must not hold it open.
+        let std_handles: Vec<_> = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+            .into_iter()
+            .map(|which| unsafe { GetStdHandle(which) })
+            .filter(|h| !h.is_null() && *h as isize != -1)
+            .filter_map(|h| {
+                let mut flags = 0u32;
+                let inheritable =
+                    unsafe { GetHandleInformation(h, &mut flags) } != 0 && flags & HANDLE_FLAG_INHERIT != 0;
+                inheritable.then(|| {
+                    unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0) };
+                    h
+                })
+            })
+            .collect();
+        let spawned = cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP).spawn().map(|_| ());
+        for h in std_handles {
+            unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        }
+        spawned
     }
 }
 
