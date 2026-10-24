@@ -79,14 +79,13 @@ pub fn run(as_json: bool) -> ExitCode {
             "not found: headless sessions use full Chrome, which starts ~3x slower (`npx playwright install chromium-headless-shell`)",
         )),
     }
-    if launch::needs_no_sandbox() {
-        checks.push(check(
+    match launch::no_sandbox_reason() {
+        Some(reason) => checks.push(check(
             "sandbox",
             "warn",
-            "running as root: Chromium will start with --no-sandbox; rely on the container boundary",
-        ));
-    } else {
-        checks.push(check("sandbox", "ok", "Chromium sandbox enabled"));
+            format!("{reason}: Chromium will start with --no-sandbox; rely on a container or VM boundary"),
+        )),
+        None => checks.push(check("sandbox", "ok", "Chromium sandbox will be used")),
     }
     let display = cfg!(any(target_os = "macos", target_os = "windows"))
         || std::env::var_os("DISPLAY").is_some()

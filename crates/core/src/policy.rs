@@ -208,11 +208,19 @@ mod tests {
         std::fs::write(dir.path().join("secret.txt"), "s").unwrap();
         let mut p = Policy::default();
         let a = allowed.join("a.txt");
-        assert_eq!(p.check_upload(a.to_str().unwrap()).unwrap_err().kind, ErrorKind::PermissionDenied, "off by default");
+        assert_eq!(
+            p.check_upload(a.to_str().unwrap()).unwrap_err().kind,
+            ErrorKind::PermissionDenied,
+            "off by default"
+        );
         p.upload_roots = vec![allowed.clone()];
         assert!(p.check_upload(a.to_str().unwrap()).is_ok());
         let escape = allowed.join("../secret.txt");
         assert_eq!(p.check_upload(escape.to_str().unwrap()).unwrap_err().kind, ErrorKind::PermissionDenied);
-        assert_eq!(p.check_upload(allowed.to_str().unwrap()).unwrap_err().kind, ErrorKind::InvalidArgument, "a directory");
+        assert_eq!(
+            p.check_upload(allowed.to_str().unwrap()).unwrap_err().kind,
+            ErrorKind::InvalidArgument,
+            "a directory"
+        );
     }
 }

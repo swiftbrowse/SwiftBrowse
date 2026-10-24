@@ -113,21 +113,40 @@ fn newest_playwright_build(root: &Path, prefix: &str, rels: &[&str]) -> Option<P
 
 /// Chromium's sandbox cannot start as root; running as root therefore needs
 /// `--no-sandbox`, which we only add automatically there and report as a warning.
-pub fn needs_no_sandbox() -> bool {
+/// Set once a browser in this process failed for lack of a usable sandbox.
+pub static SANDBOX_UNUSABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Why Chromium must run without its sandbox here, if it must.
+pub fn no_sandbox_reason() -> Option<&'static str> {
     if std::env::var(ENV_NO_SANDBOX).is_ok_and(|v| v == "1") {
-        return true;
+        return Some("SWIFTBROWSE_NO_SANDBOX=1");
+    }
+    if SANDBOX_UNUSABLE.load(std::sync::atomic::Ordering::Relaxed) {
+        return Some("the browser reported no usable sandbox");
     }
     #[cfg(target_os = "linux")]
     {
-        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-            return status
-                .lines()
-                .find_map(|l| l.strip_prefix("Uid:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .is_some_and(|euid| euid == "0");
+        let root = std::fs::read_to_string("/proc/self/status").is_ok_and(|status| {
+            status.lines().find_map(|l| l.strip_prefix("Uid:")).and_then(|l| l.split_whitespace().nth(1)) == Some("0")
+        });
+        if root {
+            return Some("running as root");
+        }
+        // Ubuntu 23.10+ (and GitHub's runners) deny unprivileged user namespaces
+        // through AppArmor, except to browsers with their own profile; the
+        // Playwright-managed builds have none.
+        let restricted = std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .is_ok_and(|v| v.trim() == "1")
+            || std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone").is_ok_and(|v| v.trim() == "0");
+        if restricted {
+            return Some("unprivileged user namespaces are restricted (AppArmor)");
         }
     }
-    false
+    None
+}
+
+pub fn needs_no_sandbox() -> bool {
+    no_sandbox_reason().is_some()
 }
 
 const PROFILE_PREFIX: &str = "swiftbrowse-profile-";

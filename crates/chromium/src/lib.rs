@@ -208,7 +208,19 @@ fn s(v: &Value, key: &str) -> String {
 }
 
 impl ChromiumBackend {
+    /// Launches a browser for this session. If it aborts for lack of a usable
+    /// sandbox, it is started once more without one (and the process remembers).
     pub async fn start(exe: &Path, options: &SessionOptions, no_sandbox: bool, extra: &[String]) -> Result<Self> {
+        match Self::start_once(exe, options, no_sandbox, extra).await {
+            Err(e) if !no_sandbox && e.message.contains("No usable sandbox") => {
+                launch::SANDBOX_UNUSABLE.store(true, std::sync::atomic::Ordering::Relaxed);
+                Self::start_once(exe, options, true, extra).await
+            }
+            other => other,
+        }
+    }
+
+    async fn start_once(exe: &Path, options: &SessionOptions, no_sandbox: bool, extra: &[String]) -> Result<Self> {
         let t0 = Instant::now();
         let trace = |phase: &str| trace(t0, phase);
         let launched = launch::launch(exe, options.headless, no_sandbox, extra).await?;
@@ -1017,10 +1029,10 @@ impl Backend for ChromiumBackend {
             );
         }
         if self.no_sandbox {
-            warnings.push(
-                "Chromium sandbox disabled (running as root or SWIFTBROWSE_NO_SANDBOX=1); use a container boundary"
-                    .into(),
-            );
+            warnings.push(format!(
+                "Chromium sandbox disabled ({}); rely on a container or VM boundary",
+                launch::no_sandbox_reason().unwrap_or("by configuration")
+            ));
         }
         CapabilityReport {
             backend: "chromium".into(),
