@@ -4,6 +4,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
+import { findBinary } from './binary.js';
 import { OPS, PROTOCOL } from './ops.generated.js';
 
 /** Thrown when an operation fails (`result.ok === false`) and `throwOnError` is on. */
@@ -19,7 +20,7 @@ export class SwiftBrowseError extends Error {
 
 /** Starts a `swiftbrowse sdk` process. Sessions attach to the warm browser daemon. */
 export async function launch(options = {}) {
-  const bin = options.executable || process.env.SWIFTBROWSE_BIN || 'swiftbrowse';
+  const bin = findBinary(options.executable);
   const args = ['sdk'];
   if (options.testDefaults !== false) args.push('--test-defaults');
   if (options.headed) args.push('--headed');

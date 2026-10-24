@@ -26,3 +26,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 tokio-tungstenite = "0.26"
 libc = "0.2"
 url = "2"
+
+[profile.release]
+# Smaller downloads for the released binaries.
+strip = true
+lto = "thin"

@@ -9,6 +9,14 @@ description = "The AI browser for browser automation and end-to-end testing: Pyt
 license = { text = "Apache-2.0" }
 requires-python = ">=3.8"
 dependencies = []
+readme = "README.md"
+keywords = ["browser", "automation", "testing", "e2e", "playwright", "mcp", "ai-agents", "chromium"]
+
+[project.urls]
+Homepage = "https://github.com/swiftbrowse/swiftbrowse"
+
+[project.scripts]
+swiftbrowse = "swiftbrowse.__main__:main"
 
 [tool.setuptools]
 packages = ["swiftbrowse"]

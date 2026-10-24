@@ -6,11 +6,47 @@
   "type": "module",
   "main": "./src/index.js",
   "types": "./src/index.d.ts",
-  "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.js" } },
-  "files": ["src"],
-  "engines": { "node": ">=18" },
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "generate": "node scripts/generate.mjs",
     "test": "node --test"
+  },
+  "bin": {
+    "swiftbrowse": "bin/swiftbrowse.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/swiftbrowse/swiftbrowse.git",
+    "directory": "sdk/typescript"
+  },
+  "homepage": "https://github.com/swiftbrowse/swiftbrowse#readme",
+  "keywords": [
+    "browser",
+    "automation",
+    "testing",
+    "e2e",
+    "playwright",
+    "mcp",
+    "ai-agents",
+    "chromium"
+  ],
+  "optionalDependencies": {
+    "swiftbrowse-linux-x64": "0.1.0",
+    "swiftbrowse-linux-arm64": "0.1.0",
+    "swiftbrowse-darwin-x64": "0.1.0",
+    "swiftbrowse-darwin-arm64": "0.1.0",
+    "swiftbrowse-win32-x64": "0.1.0"
   }
 }

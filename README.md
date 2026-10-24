@@ -7,11 +7,14 @@
 ## Quick start
 
 ```sh
-cargo build --release
-./target/release/swiftbrowse doctor            # what this machine can run
-./target/release/swiftbrowse run examples/form-signup.json
-./target/release/swiftbrowse mcp               # MCP server on stdio
+npm install swiftbrowse        # or: pip install swiftbrowse — both ship the native binary
+npx playwright install chromium chromium-headless-shell   # a Chromium to drive
+npx swiftbrowse doctor         # what this machine can run
+npx swiftbrowse test           # run *.test.json files
+npx swiftbrowse mcp            # MCP server on stdio, for agents
 ```
+
+Prebuilt for Linux (x64, arm64; glibc 2.35+), macOS (Apple Silicon, Intel) and Windows x64; archives are on the GitHub releases page. From source: `cargo build --release` (Rust 1.89+).
 
 `doctor` finds Chromium via `SWIFTBROWSE_CHROMIUM`, then Playwright-managed builds (`npx playwright install chromium`), then standard install locations and `PATH`. Headless sessions prefer Chromium's headless shell (`npx playwright install chromium-headless-shell`), which starts about 3× faster. On Linux and macOS, SwiftBrowse talks to the browser over a pipe, so no local debugging port is opened; set `SWIFTBROWSE_TRANSPORT=websocket` to use a port instead.
 

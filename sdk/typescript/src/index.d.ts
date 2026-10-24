@@ -2,7 +2,7 @@ import type { Condition, Operations, Target } from './ops.generated.js';
 export type * from './ops.generated.js';
 
 export interface LaunchOptions {
-  /** Path to the `swiftbrowse` binary (default: $SWIFTBROWSE_BIN, then PATH). */
+  /** Path to the `swiftbrowse` binary (default: $SWIFTBROWSE_BIN, then the binary installed for this platform, then PATH). */
   executable?: string;
   /** Test defaults (default true): no approval prompts for "Delete"/"Pay" clicks, `evaluate` allowed, uploads from the working directory. */
   testDefaults?: boolean;

@@ -11,11 +11,11 @@ protocol (JSON lines on stdin/stdout). Standard library only.
 """
 
 import json
-import os
 import subprocess
 import threading
 from typing import List, Optional, Sequence, Tuple, Union
 
+from ._binary import find_binary
 from ._generated import PROTOCOL, Operations
 
 __all__ = ["launch", "Browser", "Session", "SwiftBrowseError"]
@@ -53,7 +53,7 @@ def launch(
     ``test_defaults`` (on by default): no approval prompts for "Delete"/"Pay"
     clicks, ``evaluate`` allowed, uploads from the working directory.
     """
-    binary = executable or os.environ.get("SWIFTBROWSE_BIN", "swiftbrowse")
+    binary = find_binary(executable)
     args = [binary, "sdk"]
     if test_defaults:
         args.append("--test-defaults")

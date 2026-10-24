@@ -1,0 +1,7 @@
+[
+  { "id": "linux-x64",    "rust": "x86_64-unknown-linux-gnu",  "os": "linux",  "cpu": "x64",   "exe": "swiftbrowse",     "wheel": "manylinux_2_35_x86_64" },
+  { "id": "linux-arm64",  "rust": "aarch64-unknown-linux-gnu", "os": "linux",  "cpu": "arm64", "exe": "swiftbrowse",     "wheel": "manylinux_2_35_aarch64" },
+  { "id": "darwin-arm64", "rust": "aarch64-apple-darwin",      "os": "darwin", "cpu": "arm64", "exe": "swiftbrowse",     "wheel": "macosx_11_0_arm64" },
+  { "id": "darwin-x64",   "rust": "x86_64-apple-darwin",       "os": "darwin", "cpu": "x64",   "exe": "swiftbrowse",     "wheel": "macosx_10_12_x86_64" },
+  { "id": "win32-x64",    "rust": "x86_64-pc-windows-msvc",    "os": "win32",  "cpu": "x64",   "exe": "swiftbrowse.exe", "wheel": "win_amd64" }
+]

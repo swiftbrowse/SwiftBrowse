@@ -1,0 +1,165 @@
+name: release
+
+# Push a tag `v<version>` to publish: binaries for five platforms, the npm packages
+# (swiftbrowse + swiftbrowse-<platform>) and the PyPI wheels, plus a GitHub release.
+# Run it by hand with dry_run (the default) to build and check everything without
+# publishing anything.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and check everything, publish nothing
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      # The tag, the crates and both SDKs must all carry the same version.
+      - id: v
+        shell: bash
+        run: |
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          npm_version=$(node -p "require('./sdk/typescript/package.json').version")
+          py_version=$(sed -n 's/^version = "\(.*\)"/\1/p' sdk/python/pyproject.toml | head -1)
+          echo "crates $cargo_version, npm $npm_version, python $py_version"
+          if [ "$cargo_version" != "$npm_version" ] || [ "$cargo_version" != "$py_version" ]; then
+            echo "::error::versions differ between Cargo.toml, sdk/typescript/package.json and sdk/python/pyproject.toml"
+            exit 1
+          fi
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" != "true" ]; then
+            echo "::error::publishing happens only from a tag: git tag v$cargo_version && git push origin v$cargo_version"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$cargo_version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match version $cargo_version"
+            exit 1
+          fi
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds run on Ubuntu 22.04, so the binaries need glibc 2.35 at most.
+          - { id: linux-x64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, exe: swiftbrowse }
+          - { id: linux-arm64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, exe: swiftbrowse }
+          - { id: darwin-arm64, os: macos-14, target: aarch64-apple-darwin, exe: swiftbrowse }
+          - { id: darwin-x64, os: macos-14, target: x86_64-apple-darwin, exe: swiftbrowse, cross: true }
+          - { id: win32-x64, os: windows-latest, target: x86_64-pc-windows-msvc, exe: swiftbrowse.exe }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked -p swiftbrowse-cli --target ${{ matrix.target }}
+      - name: Smoke test
+        if: ${{ !matrix.cross }}
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/${{ matrix.exe }}
+          "$bin" --version
+          "$bin" doctor --json > /dev/null || true
+      - name: Check the glibc requirement
+        if: runner.os == 'Linux'
+        run: |
+          need=$(objdump -T target/${{ matrix.target }}/release/swiftbrowse | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "needs $need"
+          [ "$(printf '%s\nGLIBC_2.35\n' "$need" | sort -V | tail -1)" = "GLIBC_2.35" ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.id }}
+          path: target/${{ matrix.target }}/release/${{ matrix.exe }}
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # the GitHub release
+      id-token: write # npm provenance
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      # One directory per platform: bins/<id>/<exe>.
+      - uses: actions/download-artifact@v4
+        with:
+          path: bins
+      - run: chmod +x bins/*/swiftbrowse && ls -lR bins
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the packages
+        run: |
+          node scripts/release/npm.mjs "$VERSION" bins dist/npm
+          python scripts/release/wheels.py "$VERSION" bins dist/wheels
+          python -m pip install --quiet twine
+          python -m twine check --strict dist/wheels/*
+      - name: Check the credentials
+        if: env.DRY_RUN != 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          [ -n "$NPM_TOKEN" ] || { echo "::error::repository secret NPM_TOKEN is not set"; exit 1; }
+          [ -n "$PYPI_TOKEN" ] || { echo "::error::repository secret PYPI_TOKEN is not set"; exit 1; }
+      # Platform packages first: `swiftbrowse` depends on them. Versions already on
+      # the registry are skipped, so a failed run can simply be re-run.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for dir in dist/npm/swiftbrowse-* dist/npm/swiftbrowse; do
+            name=$(node -p "require('./$dir/package.json').name")
+            if [ "$DRY_RUN" = "true" ]; then
+              (cd "$dir" && npm publish --dry-run --access public)
+            elif npm view "$name@$VERSION" version > /dev/null 2>&1; then
+              echo "$name@$VERSION is already published"
+            else
+              (cd "$dir" && npm publish --access public --provenance)
+            fi
+          done
+      - name: Publish to PyPI
+        if: env.DRY_RUN != 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: python -m twine upload --skip-existing --non-interactive dist/wheels/*
+      - name: GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist/archives
+          for dir in bins/*; do
+            id=$(basename "$dir")
+            if [ "$id" = win32-x64 ]; then
+              (cd "$dir" && zip -q "../../dist/archives/swiftbrowse-$VERSION-$id.zip" swiftbrowse.exe)
+            else
+              tar -czf "dist/archives/swiftbrowse-$VERSION-$id.tar.gz" -C "$dir" swiftbrowse
+            fi
+          done
+          (cd dist/archives && sha256sum * > SHA256SUMS)
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "SwiftBrowse $VERSION" --generate-notes dist/archives/*
