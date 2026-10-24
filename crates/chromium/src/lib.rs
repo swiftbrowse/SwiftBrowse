@@ -27,6 +27,7 @@ const HELPER: &str = include_str!("helper.js");
 const CMD_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BUFFER: usize = 200;
 const WORLD: &str = "swiftbrowse";
+const HELPER_MISSING: &str = "__swiftbrowse_helper_missing__";
 /// Longest wait for a client-rendered page that is still empty at `load`.
 const RENDER_WAIT: Duration = Duration::from_secs(5);
 
@@ -61,7 +62,11 @@ impl BackendFactory for ChromiumFactory {
     }
 
     async fn launch(&self, options: &SessionOptions) -> Result<Box<dyn Backend>> {
-        let exe = self.executable.clone().or_else(launch::discover).ok_or_else(|| {
+        let exe = self.executable.clone().or_else(|| {
+            let shell = if options.headless { launch::discover_headless_shell() } else { None };
+            shell.or_else(launch::discover)
+        });
+        let exe = exe.ok_or_else(|| {
             CoreError::new(
                 ErrorKind::Unsupported,
                 format!("no Chromium found; set {} or run `swiftbrowse doctor`", launch::ENV_EXECUTABLE),
@@ -85,6 +90,10 @@ struct State {
     world: Option<i64>,
     /// Isolated worlds created for the main frame so far; tells navigation when the new document's world exists.
     worlds_created: u64,
+    /// Loader id of the newest main-frame document (lifecycle `init`).
+    last_init_loader: String,
+    /// Loader id of the document the current isolated world belongs to.
+    world_loader: String,
     helper_in: Option<i64>,
     lifecycle: HashSet<(String, String)>,
     doc_status: HashMap<String, u16>,
@@ -106,6 +115,7 @@ pub struct ChromiumBackend {
     profile: Option<tempfile::TempDir>,
     pump: tokio::task::JoinHandle<()>,
     version: Option<String>,
+    headless_shell: bool,
     /// Document generation when the last click was dispatched.
     worlds_at_click: u64,
     headless: bool,
@@ -129,7 +139,20 @@ impl ChromiumBackend {
         let trace = |phase: &str| trace(t0, phase);
         let launched = launch::launch(exe, options.headless, no_sandbox, extra).await?;
         trace("browser process ready");
-        let (cdp, events) = Cdp::connect(&launched.ws_url).await?;
+        let (cdp, events) = match launched.transport {
+            launch::Transport::WebSocket(ref url) => Cdp::connect(url).await?,
+            #[cfg(target_os = "linux")]
+            launch::Transport::Pipe(to_browser, from_browser) => Cdp::over_pipe(to_browser, from_browser),
+        };
+        let stderr_tail = launched.stderr_tail.clone();
+        let startup_error = move |e: CoreError| {
+            let tail = stderr_tail.lock().unwrap().join("\n");
+            if tail.is_empty() {
+                e
+            } else {
+                CoreError::backend(format!("{}; browser output:\n{tail}", e.message))
+            }
+        };
         trace("devtools connected");
 
         // Each session already owns a browser process and a throwaway profile, so
@@ -139,7 +162,7 @@ impl ChromiumBackend {
             cdp.send("Target.getTargets", json!({}), None, CMD_TIMEOUT),
         );
         let version = version.ok().map(|v| s(&v, "product"));
-        let existing = targets?["targetInfos"]
+        let existing = targets.map_err(&startup_error)?["targetInfos"]
             .as_array()
             .and_then(|t| t.iter().find(|t| s(t, "type") == "page").map(|t| s(t, "targetId")));
         let target_id = match existing {
@@ -162,7 +185,6 @@ impl ChromiumBackend {
         // Independent setup commands go out together instead of one round trip each.
         let sid = Some(session.as_str());
         let setup = [
-            ("Page.getFrameTree", json!({})),
             ("Page.enable", json!({})),
             ("Page.setLifecycleEventsEnabled", json!({ "enabled": true })),
             ("Runtime.enable", json!({})),
@@ -176,16 +198,19 @@ impl ChromiumBackend {
                 json!({ "width": options.viewport.0, "height": options.viewport.1, "deviceScaleFactor": 1, "mobile": false }),
             ),
         ];
-        let cdp_ref = &cdp;
-        let replies = futures_util::future::join_all(setup.into_iter().map(|(m, p)| async move {
-            let r = cdp_ref.send(m, p, sid, CMD_TIMEOUT).await;
-            trace(m);
-            r
-        }))
-        .await;
-        let mut replies = replies.into_iter().collect::<Result<Vec<_>>>()?.into_iter();
-        let tree = replies.next().unwrap_or_default();
-        state.lock().unwrap().main_frame = s(&tree["frameTree"]["frame"], "id");
+        // A page target's main frame id is its target id. Set it before setup so
+        // lifecycle events for the first document are recognised.
+        state.lock().unwrap().main_frame = target_id.clone();
+        // Sent together, confirmed together. (Not waiting for these replies before
+        // the first navigation was measured: no faster, and early network events
+        // could be missed.)
+        let pending: Vec<cdp::Pending1> = setup.into_iter().map(|(m, p)| cdp.enqueue(m, p, sid)).collect();
+        for reply in pending {
+            reply
+                .wait(CMD_TIMEOUT)
+                .await
+                .map_err(|e| CoreError::backend(format!("session setup failed: {}", e.message)))?;
+        }
         trace("page domains enabled");
 
         Ok(Self {
@@ -198,6 +223,7 @@ impl ChromiumBackend {
             pump,
             version,
             worlds_at_click: 0,
+            headless_shell: launch::is_headless_shell(exe),
             headless: options.headless,
             no_sandbox,
         })
@@ -233,7 +259,9 @@ impl ChromiumBackend {
         for _ in 0..4 {
             let ctx = self.world().await?;
             let installed = self.state.lock().unwrap().helper_in == Some(ctx);
-            let call = format!("globalThis.__sb.{func}(...{args})");
+            // Never assume the helper exists: Chromium can create the named world
+            // in a document where the start-up script did not run.
+            let call = format!("globalThis.__sb ? globalThis.__sb.{func}(...{args}) : {HELPER_MISSING:?}");
             let expr = if installed { call } else { format!("{HELPER}\n{call}") };
             let r = self
                 .send(
@@ -252,8 +280,14 @@ impl ChromiumBackend {
                         }
                         return Err(err);
                     }
+                    let value = v["result"].get("value").cloned().unwrap_or(Value::Null);
+                    if value.as_str() == Some(HELPER_MISSING) {
+                        self.state.lock().unwrap().helper_in = None;
+                        last = CoreError::backend("helper missing in page world");
+                        continue;
+                    }
                     self.state.lock().unwrap().helper_in = Some(ctx);
-                    return Ok(v["result"].get("value").cloned().unwrap_or(Value::Null));
+                    return Ok(value);
                 }
                 Err(e) if context_gone(&e) => {
                     {
@@ -279,12 +313,14 @@ impl ChromiumBackend {
 
     /// Waits for the new document's isolated world, then for its load event in the page.
     /// `Ok(None)` means the fast path could not be used and the caller should fall back.
-    async fn load_in_page(&mut self, worlds_before: u64, deadline: tokio::time::Instant) -> Result<Option<Loaded>> {
+    /// `loader` is the navigation's loader id: only the isolated world created for
+    /// that document is used.
+    async fn load_in_page(&mut self, loader: &str, deadline: tokio::time::Instant) -> Result<Option<Loaded>> {
         loop {
             self.lifecycle.borrow_and_update();
             {
                 let st = self.state.lock().unwrap();
-                if st.worlds_created > worlds_before && st.world.is_some() {
+                if st.world.is_some() && st.world_loader == loader {
                     break;
                 }
             }
@@ -359,6 +395,16 @@ impl Drop for ChromiumBackend {
     }
 }
 
+static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Event timings (ms since process start) on stderr when `SWIFTBROWSE_TRACE` is set.
+fn trace_event(what: &str) {
+    if std::env::var_os("SWIFTBROWSE_TRACE").is_some() {
+        let t0 = *T0.get_or_init(Instant::now);
+        eprintln!("[swiftbrowse] @{:.1} {what}", t0.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
 /// Phase timings on stderr when `SWIFTBROWSE_TRACE` is set.
 fn trace(since: Instant, phase: &str) {
     if std::env::var_os("SWIFTBROWSE_TRACE").is_some() {
@@ -410,6 +456,10 @@ async fn pump_events(
                         st.lifecycle.clear();
                     }
                     st.lifecycle.insert((s(p, "loaderId"), s(p, "name")));
+                    if s(p, "name") == "init" {
+                        st.last_init_loader = s(p, "loaderId");
+                    }
+                    trace_event(&format!("lifecycle {}", s(p, "name")));
                     lifecycle.send_modify(|n| *n += 1);
                 }
             }
@@ -420,6 +470,8 @@ async fn pump_events(
                     st.world = id;
                     st.helper_in = id;
                     st.worlds_created += 1;
+                    st.world_loader = st.last_init_loader.clone();
+                    trace_event("world created");
                     lifecycle.send_modify(|n| *n += 1);
                     if std::env::var_os("SWIFTBROWSE_TRACE").is_some() {
                         eprintln!("[swiftbrowse] new document in main frame (world #{})", st.worlds_created);
@@ -569,7 +621,7 @@ impl Backend for ChromiumBackend {
         }
         CapabilityReport {
             backend: "chromium".into(),
-            engine: "chromium".into(),
+            engine: if self.headless_shell { "chromium-headless-shell" } else { "chromium" }.into(),
             engine_version: self.version.clone(),
             headless: self.headless,
             capabilities: vec![
@@ -597,9 +649,9 @@ impl Backend for ChromiumBackend {
 
     async fn navigate(&mut self, url: &str, wait_until: WaitUntil, timeout: Duration) -> Result<NavigationInfo> {
         let started = Instant::now();
-        let worlds_before = self.state.lock().unwrap().worlds_created;
+        trace_event("navigate start");
         let r = self.cdp.send("Page.navigate", json!({ "url": url }), Some(&self.session), timeout).await?;
-        trace(started, "navigate committed");
+        trace_event("Page.navigate replied");
         let error = s(&r, "errorText");
         if !error.is_empty() {
             return Err(CoreError::new(ErrorKind::NavigationFailed, format!("{url}: {error}")));
@@ -611,8 +663,8 @@ impl Backend for ChromiumBackend {
         // waiting for the event here and then asking the page in a second round trip.
         if !same_document && wait_until == WaitUntil::Load {
             let deadline = tokio::time::Instant::from_std(started + timeout);
-            if let Some(page) = self.load_in_page(worlds_before, deadline).await? {
-                trace(started, "loaded (in-page)");
+            if let Some(page) = self.load_in_page(&loader, deadline).await? {
+                trace_event("in-page load resolved");
                 let status = self.state.lock().unwrap().doc_status.get(&loader).copied();
                 return Ok(NavigationInfo {
                     url: page.url,

@@ -29,8 +29,14 @@ const COLD = +opt('--cold', 20);
 const WARMUP = 3;
 const OUT = path.resolve(opt('--out', path.join(here, 'results')));
 
-const CHROME = process.env.SWIFTBROWSE_CHROMIUM || JSON.parse(execFileSync(SB_BIN, ['doctor', '--json']).toString())
-  .checks.find((c) => c.check === 'chromium').detail.split(' at ').pop();
+// Same binary for both tools: --browser shell (headless shell, default; Playwright's
+// own headless default) or --browser full (full Chrome in new-headless mode).
+const BROWSER = opt('--browser', 'shell');
+const doctorChecks = JSON.parse(execFileSync(SB_BIN, ['doctor', '--json']).toString()).checks;
+const pathOf = (name) => doctorChecks.find((c) => c.check === name)?.detail.split(' at ').pop().replace(/ \(used for headless sessions\)$/, '');
+const CHROME = BROWSER === 'full' ? pathOf('chromium') : pathOf('headless_shell');
+if (!CHROME) throw new Error(`no ${BROWSER} browser found (see swiftbrowse doctor)`);
+process.env.SWIFTBROWSE_CHROMIUM = CHROME;
 
 // ---------- pages ----------
 const formHtml = fs.readFileSync(path.join(here, '../crates/chromium/tests/fixtures/form.html'), 'utf8');
@@ -207,7 +213,7 @@ const env = {
   node: process.version,
   playwright: '1.64.0 (playwright-core, library API)',
   swiftbrowse: `${sbVersion} (MCP over stdio)`,
-  chromium: chromeVersion,
+  chromium: `${chromeVersion} (${BROWSER === 'full' ? 'full Chrome, new headless' : 'headless shell'}, both tools)`,
   iterations: ITER, warmup_discarded: WARMUP, cold_runs: COLD, order: ORDER,
   network: 'loopback HTTP server in the benchmark process',
 };

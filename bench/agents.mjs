@@ -26,8 +26,14 @@ const SB_BIN = path.resolve(args[0] || path.join(here, '../target/release/swiftb
 const ITER = +opt('--iter', 15);
 const COLD = +opt('--cold', 10);
 const OUT = path.resolve(opt('--out', path.join(here, 'results')));
-const CHROME = process.env.SWIFTBROWSE_CHROMIUM || JSON.parse(execFileSync(SB_BIN, ['doctor', '--json']).toString())
-  .checks.find((c) => c.check === 'chromium').detail.split(' at ').pop();
+// Same binary for both tools: --browser shell (headless shell, default; Playwright's
+// own headless default) or --browser full (full Chrome in new-headless mode).
+const BROWSER = opt('--browser', 'shell');
+const doctorChecks = JSON.parse(execFileSync(SB_BIN, ['doctor', '--json']).toString()).checks;
+const pathOf = (name) => doctorChecks.find((c) => c.check === name)?.detail.split(' at ').pop().replace(/ \(used for headless sessions\)$/, '');
+const CHROME = BROWSER === 'full' ? pathOf('chromium') : pathOf('headless_shell');
+if (!CHROME) throw new Error(`no ${BROWSER} browser found (see swiftbrowse doctor)`);
+process.env.SWIFTBROWSE_CHROMIUM = CHROME;
 const PW_MCP = path.join(here, 'node_modules/@playwright/mcp/cli.js');
 const PW_MCP_VERSION = JSON.parse(fs.readFileSync(path.join(here, 'node_modules/@playwright/mcp/package.json'))).version;
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-bench-'));
@@ -211,7 +217,7 @@ const p95 = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[Math.min
 const env = {
   date: new Date().toISOString(),
   cpu: `${os.cpus()[0]?.model} x${os.cpus().length}`,
-  chromium: execFileSync(CHROME, ['--version']).toString().trim(),
+  chromium: `${execFileSync(CHROME, ['--version']).toString().trim()} (${BROWSER === 'full' ? 'full Chrome, new headless' : 'headless shell'}, both tools)`,
   swiftbrowse: execFileSync(SB_BIN, ['--version']).toString().trim(),
   playwright_mcp: PW_MCP_VERSION,
   iterations: ITER, cold_runs: COLD,

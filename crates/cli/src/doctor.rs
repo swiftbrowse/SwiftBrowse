@@ -68,6 +68,17 @@ pub fn run(as_json: bool) -> ExitCode {
             ),
         )),
     }
+    match launch::discover_headless_shell() {
+        Some(path) => {
+            let v = output(&path.display().to_string(), &["--version"]).unwrap_or_else(|| "version unknown".into());
+            checks.push(check("headless_shell", "ok", format!("{v} at {} (used for headless sessions)", path.display())));
+        }
+        None => checks.push(check(
+            "headless_shell",
+            "warn",
+            "not found: headless sessions use full Chrome, which starts ~3x slower (`npx playwright install chromium-headless-shell`)",
+        )),
+    }
     if launch::needs_no_sandbox() {
         checks.push(check(
             "sandbox",

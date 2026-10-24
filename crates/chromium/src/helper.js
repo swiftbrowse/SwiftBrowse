@@ -8,14 +8,22 @@
   // whole render.
   let lastScriptChange = 0;
   let parsed = document.readyState !== 'loading';
-  if (!parsed) document.addEventListener('DOMContentLoaded', () => { parsed = true; }, { once: true });
-  new MutationObserver((ms) => {
+  const tracker = new MutationObserver((ms) => {
     if (!parsed) return;
     for (const m of ms) {
       for (const n of m.addedNodes) if (n.nodeType === 1) { lastScriptChange = performance.now(); return; }
       for (const n of m.removedNodes) if (n.nodeType === 1) { lastScriptChange = performance.now(); return; }
     }
-  }).observe(document, { subtree: true, childList: true });
+  });
+  tracker.observe(document, { subtree: true, childList: true });
+  if (!parsed) {
+    document.addEventListener('DOMContentLoaded', () => {
+      // Records are delivered asynchronously: drop the parser's still-pending
+      // ones so they aren't mistaken for script changes after this point.
+      tracker.takeRecords();
+      parsed = true;
+    }, { once: true });
+  }
   const reg = new Map();
   const ids = new WeakMap();
   let next = 1;

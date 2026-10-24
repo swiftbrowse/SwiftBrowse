@@ -13,7 +13,7 @@ cargo build --release
 ./target/release/swiftbrowse mcp               # MCP server on stdio
 ```
 
-`doctor` finds Chromium via `SWIFTBROWSE_CHROMIUM`, then Playwright-managed builds (`npx playwright install chromium`), then standard install locations and `PATH`.
+`doctor` finds Chromium via `SWIFTBROWSE_CHROMIUM`, then Playwright-managed builds (`npx playwright install chromium`), then standard install locations and `PATH`. Headless sessions prefer Chromium's headless shell (`npx playwright install chromium-headless-shell`), which starts about 3× faster. On Linux, SwiftBrowse talks to the browser over a pipe, so no local debugging port is opened; set `SWIFTBROWSE_TRANSPORT=websocket` to use a port instead.
 
 MCP client config:
 
@@ -67,21 +67,22 @@ The core retries only failures the backend guarantees happened *before* input re
 
 ## Agent benchmark vs Playwright MCP
 
-`bench/agents.mjs` drives SwiftBrowse MCP and Playwright MCP 0.0.83 over the same transport (MCP stdio) the way an agent does: take a snapshot, read element refs from it, act, confirm the outcome. It counts wall time, tool calls, and the bytes each tool returns into the agent's context. Playwright MCP runs twice: with its defaults, and tuned with `--timeout-settle 0` (its best case; the default waits 500 ms after each action). Same Chromium, pages, viewport and machine; 15 iterations, 10 interleaved cold starts. All contenders succeeded on every iteration.
+`bench/agents.mjs` drives SwiftBrowse MCP and Playwright MCP 0.0.83 over the same transport (MCP stdio) the way an agent does: take a snapshot, read element refs from it, act, confirm the outcome. It counts wall time, tool calls, and the bytes each tool returns into the agent's context. Playwright MCP runs twice: with its defaults, and tuned with `--timeout-settle 0` (its best case; the default waits 500 ms after each action). Both use the same Chromium binary (headless shell 153.0.8010.12), pages and viewport; 15 iterations, 10 interleaved cold starts. Every contender succeeded on every iteration.
 
 | task | SwiftBrowse MCP | Playwright MCP (tuned) | Playwright MCP (defaults) |
 |---|---|---|---|
-| sign-up form: fill ×2, select, check, submit, confirm | **353 ms · 7 calls · 1.0 KB** | 469 ms · 8 calls · 2.3 KB | 1,285 ms · 8 calls · 2.3 KB |
-| 400-row page, look first: snapshot, click "Edit row 250", confirm | **135 ms · 3 calls · 6.6 KB** | 868 ms · 4 calls · 152.6 KB | 1,384 ms · 4 calls · 152.6 KB |
-| 400-row page, direct: click by role and name, confirm | **117 ms · 2 calls · 0.2 KB** | 746 ms · 3 calls · 0.8 KB | 1,263 ms · 3 calls · 0.8 KB |
-| cold start → first page loaded | **378 ms** | 827 ms | 834 ms |
+| sign-up form: fill ×2, select, check, submit, confirm | **335 ms · 7 calls · 1.1 KB** | 472 ms · 8 calls · 2.2 KB | 1,302 ms · 8 calls · 2.2 KB |
+| 400-row page, look first: snapshot, click "Edit row 250", confirm | **166 ms · 3 calls · 6.6 KB** | 1,037 ms · 4 calls · 152.6 KB | 1,604 ms · 4 calls · 152.6 KB |
+| 400-row page, direct: click by role and name, confirm | **153 ms · 2 calls · 0.2 KB** | 834 ms · 3 calls · 0.8 KB | 1,415 ms · 3 calls · 0.8 KB |
+| cold start → first page loaded | **175 ms** | 759 ms | 773 ms |
 
 Why it wins, and the caveats:
-- **Context:** snapshots and action results reach the agent as compact text (`ok click button "Sign up" [e12] · verified: text_visible`). The full structured result stays in `structuredContent`. SwiftBrowse snapshots are bounded (150 elements), while Playwright MCP's `browser_snapshot` returns the whole page. On the 400-row page that's 6.6 KB vs 152.6 KB, though the bounded snapshot doesn't contain row 250. The agent has to locate it, which the snapshot itself tells it to do.
+- **Context:** snapshots and action results reach the agent as compact text (`ok click button "Sign up" [e12] · verified: text_visible`). The full structured result stays in `structuredContent`. SwiftBrowse snapshots are bounded (150 elements), while Playwright MCP's `browser_snapshot` returns the whole page. On the 400-row page that's 6.6 KB vs 152.6 KB, though the bounded snapshot doesn't contain row 250; the agent has to locate it, which the snapshot itself tells it to do.
 - **Calls:** `click` with `expect` acts and confirms in one call; Playwright MCP needs a separate `browser_wait_for`.
-- Medians from one machine and two synthetic pages. The task flows are in `bench/agents.mjs`, and neither server was tuned per task. Results: `bench/results/agents-*.json`.
+- **Cold start:** the headless shell, a browser launched while the client is still connecting, and pipe transport.
+- Medians from one machine and two synthetic pages. Task flows are in `bench/agents.mjs`; neither server was tuned per task. Results: `bench/results/agents-*`.
 
-Run it: `cd bench && npm install && node agents.mjs ../target/release/swiftbrowse --iter 15 --cold 10`.
+Run it: `cd bench && npm install && node agents.mjs ../target/release/swiftbrowse --iter 15 --cold 10 [--browser shell|full]`.
 
 ## Tested on live sites
 
@@ -106,29 +107,27 @@ Both pass every step (2 runs each, 0 console errors, 0 network failures, 0 leake
 
 `bench/bench.mjs` runs identical tasks with Playwright 1.64.0 (library API) and SwiftBrowse (through MCP over stdio). Both use the same Chromium binary, local pages and viewport, with warm-ups discarded. Its header lists the fairness rules; keep them when changing it.
 
-Latest run: 4× Xeon 2.1 GHz cloud container, Chrome for Testing 153.0.8010.12, 50 warm iterations, 20 interleaved cold runs, both run orders (SwiftBrowse-first / Playwright-first). p50 in ms:
+Latest run: 4× Xeon 2.1 GHz cloud container, Chrome for Testing 153.0.8010.12 headless shell for **both** tools (Playwright's own headless default), 50 warm iterations, 20 interleaved cold runs, both run orders (SwiftBrowse-first / Playwright-first). p50 in ms:
 
 | task | SwiftBrowse | Playwright | ratio |
 |---|---:|---:|---:|
-| cold start → loaded page | 424 / 398 | 398 / 361 | 1.06 / 1.10 (near parity) |
-| navigate | 32.1 / 30.3 | 27.3 / 27.9 | 1.18 / 1.09 (engine parity; see below) |
-| fill (email) | 9.6 / 8.6 | 34.1 / 35.2 | 0.28 / 0.25 |
-| click (checkbox label) | 18.0 / 16.4 | 41.7 / 40.1 | 0.43 / 0.41 |
-| submit + wait for result | 286 / 286 | 338 / 338 | 0.85 / 0.85 |
-| **form task total** | **360 / 352** | **454 / 459** | **0.79 / 0.77** |
-| snapshot, small page | 1.6 | 6.7 | 0.23 |
-| snapshot, 400-row page | 13.7 | 127 | 0.11 |
-| role+name lookup, 400-row page | 3.3 | 17.0 | 0.20 |
-
-Snapshot output an agent receives (bytes): small page **288 vs 349**; 400-row page 6,400 vs 125,549.
+| cold start → loaded page | 171 / 166 | 170 / 161 | 1.01 / 1.03 (parity) |
+| navigate | 19.8 / 19.0 | 20.8 / 18.8 | 0.95 / 1.01 |
+| navigate, 145 interleaved pairs ×3 | | | SwiftBrowse faster by 1.31 ± 0.89, 1.74 ± 0.83, 0.56 ± 0.74 ms (95% CI) |
+| fill (email) | 7.1 | 33.0 | 0.21 |
+| click (checkbox label) | 16.9 | 37.6 | 0.45 |
+| **form task total** | **336 / 334** | **452 / 437** | **0.74 / 0.77** |
+| snapshot, 400-row page | 18.3 | 157 | 0.12 |
+| role+name lookup, 400-row page | 4.4 | 20.3 | 0.22 |
 
 Read these with care:
-- SwiftBrowse is measured through MCP (a separate process, JSON over stdio); Playwright through its in-process library. The MCP round trip costs 1–4 ms per call. Server-side, SwiftBrowse's navigate takes 26–28 ms against Playwright's 27, so the navigate row is transport, not engine. Cold start is also within run-to-run spread.
-- SwiftBrowse does *more* work in some steps: `fill` reads the value back to verify it, and `navigate` returns the real title. Playwright's `goto` returns neither.
-- Snapshots differ in format: SwiftBrowse sends line-per-element text with refs and the URL; Playwright's `ariaSnapshot()` is YAML without refs. On the large page SwiftBrowse is bounded to 150 elements, so those two sizes aren't equivalent content.
+- SwiftBrowse is measured through MCP (a separate process, JSON over stdio); Playwright through its in-process library. SwiftBrowse still wins navigate by about 1 ms in paired runs, but block medians move ±5% between runs.
+- **Cold start is at parity, not a win.** With the same binary, both tools are bounded by Chromium's own startup (~100 ms to a usable tab) plus the first page load. Tried and measured without gain: pipe vs WebSocket transport, not waiting for setup replies before the first navigation, an initial startup tab, `--disable-gpu`, `--in-process-gpu`.
+- SwiftBrowse does *more* work in some steps: `fill` reads the value back, and `navigate` returns the real title and waits for client-rendered pages that are still empty.
+- Snapshots differ in format (line-per-element text with refs vs. ARIA YAML); on the large page SwiftBrowse is bounded to 150 elements, so sizes aren't equivalent content.
 - One machine and one fixture set. Full tables: `bench/results/`.
 
-Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse --iter 50 --cold 10 [--order playwright-first]`.
+Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse --iter 50 --cold 20 [--browser shell|full] [--order playwright-first]`.
 
 ## What exists
 

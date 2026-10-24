@@ -23,3 +23,13 @@
 ## 2026-10-24 · CEF (Chromium Embedded Framework): not now
 - Considered for the desktop shell. Gives one Chromium everywhere, but ships and patches a full browser per platform (on the order of 100+ MB), against the spec's lightweight goal, and adds nothing to automation, where the pinned Chromium backend already exists.
 - **Revisit when** desktop work starts and system-WebView differences show up in tests; offer it then as an optional engine, not the default.
+
+## 2026-10-24 · Headless shell by default for headless sessions
+- Same Chromium version, about 3× faster process start (51 vs 146 ms). Cold start to first page: 419 → ~160 ms. Playwright's own library uses it by default too, so benchmarks give both tools the same binary (`--browser shell|full`).
+- **Reversibility:** two-way door (`SWIFTBROWSE_CHROMIUM` overrides; headed sessions use full Chrome).
+
+## 2026-10-24 · Pipe transport on Linux
+- Measured no speed gain over WebSocket (161 vs 164 ms cold), but it opens no local TCP debugging port that other local processes could use to drive the browser. Kept for security. WebSocket remains for other platforms and via `SWIFTBROWSE_TRANSPORT=websocket`.
+
+## 2026-10-24 · Cold start: stop at Chromium's floor
+- Tried: not waiting for setup replies (no gain, and it lost early network events, so reverted), an initial startup tab (gain only over WebSocket), GPU flags (no gain). Against the Playwright library on the same binary, cold start is at parity. The next step would be a warm browser pool or daemon, which changes the isolation model; not taken without a decision.

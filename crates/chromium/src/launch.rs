@@ -18,18 +18,8 @@ pub fn discover() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os(ENV_EXECUTABLE) {
         return Some(PathBuf::from(p));
     }
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Some(p) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
-        roots.push(PathBuf::from(p));
-    }
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        let home = PathBuf::from(home);
-        roots.push(home.join(".cache/ms-playwright"));
-        roots.push(home.join("Library/Caches/ms-playwright"));
-        roots.push(home.join("AppData/Local/ms-playwright"));
-    }
-    for root in roots {
-        if let Some(p) = newest_playwright_chromium(&root) {
+    for root in playwright_roots() {
+        if let Some(p) = newest_playwright_build(&root, "chromium-", FULL_BUILDS) {
             return Some(p);
         }
     }
@@ -48,31 +38,77 @@ pub fn discover() -> Option<PathBuf> {
     std::env::split_paths(&path).flat_map(|dir| names.iter().map(move |n| dir.join(n))).find(|p| p.is_file())
 }
 
-fn newest_playwright_chromium(root: &Path) -> Option<PathBuf> {
+pub const ENV_HEADLESS_SHELL: &str = "SWIFTBROWSE_HEADLESS_SHELL";
+
+const FULL_BUILDS: &[&str] = &[
+    "chrome-linux64/chrome",
+    "chrome-linux/chrome",
+    "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "chrome-win/chrome.exe",
+    "chrome-win64/chrome.exe",
+];
+
+const SHELL_BUILDS: &[&str] = &[
+    "chrome-headless-shell-linux64/chrome-headless-shell",
+    "chrome-linux/headless_shell",
+    "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+    "chrome-headless-shell-mac-x64/chrome-headless-shell",
+    "chrome-headless-shell-win64/chrome-headless-shell.exe",
+    "chrome-win/headless_shell.exe",
+];
+
+/// Finds Chromium's headless shell: the headless-only build Playwright also
+/// uses by default. It starts about 3x faster than full Chrome in headless
+/// mode. `SWIFTBROWSE_HEADLESS_SHELL` wins; `SWIFTBROWSE_CHROMIUM` disables it.
+pub fn discover_headless_shell() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os(ENV_HEADLESS_SHELL) {
+        return Some(PathBuf::from(p));
+    }
+    if std::env::var_os(ENV_EXECUTABLE).is_some() {
+        return None;
+    }
+    playwright_roots()
+        .iter()
+        .find_map(|root| newest_playwright_build(root, "chromium_headless_shell-", SHELL_BUILDS))
+        .or_else(|| {
+            let path = std::env::var_os("PATH")?;
+            std::env::split_paths(&path).map(|dir| dir.join("chrome-headless-shell")).find(|p| p.is_file())
+        })
+}
+
+/// Whether a binary is the headless shell (always headless; takes no `--headless`).
+pub fn is_headless_shell(exe: &Path) -> bool {
+    exe.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains("headless"))
+}
+
+fn playwright_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(p) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH") {
+        roots.push(PathBuf::from(p));
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = PathBuf::from(home);
+        roots.push(home.join(".cache/ms-playwright"));
+        roots.push(home.join("Library/Caches/ms-playwright"));
+        roots.push(home.join("AppData/Local/ms-playwright"));
+    }
+    roots
+}
+
+fn newest_playwright_build(root: &Path, prefix: &str, rels: &[&str]) -> Option<PathBuf> {
     let mut dirs: Vec<(u32, PathBuf)> = std::fs::read_dir(root)
         .ok()?
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            let rev = name.strip_prefix("chromium-")?.parse().ok()?;
+            let rev = name.strip_prefix(prefix)?.parse().ok()?;
             Some((rev, e.path()))
         })
         .collect();
     dirs.sort();
-    dirs.into_iter().rev().find_map(|(_, dir)| {
-        [
-            "chrome-linux64/chrome",
-            "chrome-linux/chrome",
-            "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-            "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-            "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-            "chrome-win/chrome.exe",
-            "chrome-win64/chrome.exe",
-        ]
-        .iter()
-        .map(|rel| dir.join(rel))
-        .find(|p| p.is_file())
-    })
+    dirs.into_iter().rev().find_map(|(_, dir)| rels.iter().map(|rel| dir.join(rel)).find(|p| p.is_file()))
 }
 
 /// Chromium's sandbox cannot start as root; running as root therefore needs
@@ -126,10 +162,33 @@ fn process_alive(_pid: u32) -> bool {
     true
 }
 
+pub enum Transport {
+    WebSocket(String),
+    #[cfg(target_os = "linux")]
+    Pipe(tokio::net::unix::pipe::Sender, tokio::net::unix::pipe::Receiver),
+}
+
 pub struct Launched {
     pub child: Child,
-    pub ws_url: String,
+    pub transport: Transport,
     pub profile: tempfile::TempDir,
+    /// Last lines the browser wrote to stderr, for startup error messages.
+    pub stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// `--remote-debugging-pipe` on Linux unless `SWIFTBROWSE_TRANSPORT=websocket`.
+fn use_pipe() -> bool {
+    cfg!(target_os = "linux") && std::env::var("SWIFTBROWSE_TRANSPORT").map_or(true, |v| v != "websocket")
+}
+
+#[cfg(target_os = "linux")]
+fn pipe_pair() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { (std::os::fd::OwnedFd::from_raw_fd(fds[0]), std::os::fd::OwnedFd::from_raw_fd(fds[1])) })
 }
 
 pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[String]) -> Result<Launched> {
@@ -139,13 +198,23 @@ pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[Strin
         .tempdir()
         .map_err(|e| CoreError::backend(format!("cannot create profile directory: {e}")))?;
     let _ = std::fs::write(profile.path().join(OWNER_FILE), std::process::id().to_string());
+    let pipe = use_pipe();
+    // Pipe transport: commands go out the moment the process exists, with no
+    // wait for a DevTools server to announce itself and no WebSocket handshake.
+    #[cfg(target_os = "linux")]
+    let pipes = if pipe {
+        let (cmd_r, cmd_w) = pipe_pair().map_err(|e| CoreError::backend(format!("cannot create pipe: {e}")))?;
+        let (resp_r, resp_w) = pipe_pair().map_err(|e| CoreError::backend(format!("cannot create pipe: {e}")))?;
+        Some((cmd_r, cmd_w, resp_r, resp_w))
+    } else {
+        None
+    };
     let mut cmd = Command::new(exe);
-    cmd.arg("--remote-debugging-port=0")
+    cmd.arg(if pipe { "--remote-debugging-pipe" } else { "--remote-debugging-port=0" })
         .arg(format!("--user-data-dir={}", profile.path().display()))
         .args([
             "--no-first-run",
             "--no-default-browser-check",
-            "--no-startup-window",
             "--no-service-autorun",
             "--disable-field-trial-config",
             "--disable-background-networking",
@@ -174,29 +243,79 @@ pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[Strin
             "--use-mock-keychain",
         ]);
     if headless {
-        cmd.args(["--headless=new", "--hide-scrollbars"]);
+        if !is_headless_shell(exe) {
+            cmd.arg("--headless=new");
+        }
+        cmd.arg("--hide-scrollbars");
     }
     if no_sandbox {
-        cmd.arg("--no-sandbox");
+        // The zygote exists to set up the sandbox; without one it only costs startup time.
+        cmd.args(["--no-sandbox", "--no-zygote"]);
     }
     cmd.args(extra);
+    if is_headless_shell(exe) && !pipe {
+        // Over WebSocket the shell opens this tab at launch, so its renderer boots
+        // while we wait to connect. Over a pipe we create the tab ourselves the
+        // moment the browser can take commands; an extra startup tab would only
+        // boot a second renderer.
+        cmd.arg("about:blank");
+    } else {
+        cmd.arg("--no-startup-window");
+    }
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
     // If SwiftBrowse dies without cleaning up (SIGKILL, crash), the kernel kills
     // the browser too instead of leaving it orphaned. The signal follows the
     // spawning thread, which is a long-lived runtime worker here.
     #[cfg(target_os = "linux")]
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+    {
+        use std::os::fd::AsRawFd;
+        // The browser reads commands from fd 3 and writes replies to fd 4.
+        let child_fds = pipes.as_ref().map(|(cmd_r, _, _, resp_w)| (cmd_r.as_raw_fd(), resp_w.as_raw_fd()));
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if let Some((cmd_r, resp_w)) = child_fds {
+                    // Move both above 3/4 first so neither dup2 clobbers the other.
+                    let a = libc::fcntl(cmd_r, libc::F_DUPFD_CLOEXEC, 10);
+                    let b = libc::fcntl(resp_w, libc::F_DUPFD_CLOEXEC, 10);
+                    if a < 0 || b < 0 || libc::dup2(a, 3) < 0 || libc::dup2(b, 4) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
     }
 
     let mut child = cmd.spawn().map_err(|e| CoreError::backend(format!("cannot start {}: {e}", exe.display())))?;
     let stderr = child.stderr.take().expect("piped stderr");
     let mut lines = BufReader::new(stderr).lines();
+    let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+    #[cfg(target_os = "linux")]
+    if let Some((cmd_r, cmd_w, resp_r, resp_w)) = pipes {
+        // The child has its own copies now.
+        drop((cmd_r, resp_w));
+        let to_browser = tokio::net::unix::pipe::Sender::from_owned_fd(cmd_w)
+            .map_err(|e| CoreError::backend(format!("pipe setup failed: {e}")))?;
+        let from_browser = tokio::net::unix::pipe::Receiver::from_owned_fd(resp_r)
+            .map_err(|e| CoreError::backend(format!("pipe setup failed: {e}")))?;
+        let tail = stderr_tail.clone();
+        // Keep draining stderr so the browser never blocks on a full pipe.
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut t = tail.lock().unwrap();
+                t.push(line);
+                if t.len() > 20 {
+                    t.remove(0);
+                }
+            }
+        });
+        return Ok(Launched { child, transport: Transport::Pipe(to_browser, from_browser), profile, stderr_tail });
+    }
+
     let mut tail: Vec<String> = Vec::new();
 
     let found = tokio::time::timeout(Duration::from_secs(30), async {
@@ -227,5 +346,5 @@ pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[Strin
     // Keep draining stderr so the browser never blocks on a full pipe.
     tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
 
-    Ok(Launched { child, ws_url, profile })
+    Ok(Launched { child, transport: Transport::WebSocket(ws_url), profile, stderr_tail })
 }

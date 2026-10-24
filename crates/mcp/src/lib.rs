@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 use swiftbrowse_core::request::op_specs;
 use swiftbrowse_core::result::VerificationStatus;
 use swiftbrowse_core::{ActionResult, CoreError, Request, SessionManager, SessionOptions};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const DEFAULT_SESSION: &str = "default";
@@ -293,7 +293,6 @@ fn tool_result(v: Value, is_error: bool) -> Value {
 /// the loop, even mid-call, so clients that kill the server don't leak browsers.
 pub async fn serve_stdio(mut server: McpServer) -> std::io::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut stdout = tokio::io::stdout();
     let terminated = terminate_signal();
     tokio::pin!(terminated);
     loop {
@@ -317,9 +316,13 @@ pub async fn serve_stdio(mut server: McpServer) -> std::io::Result<()> {
             ),
         };
         if let Some(r) = response {
-            stdout.write_all(r.to_string().as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+            // One synchronous write per message: tokio's stdout hands every write
+            // to its blocking pool, which cost ~1 ms per response in measurements.
+            let mut line = r.to_string();
+            line.push('\n');
+            let mut out = std::io::stdout().lock();
+            std::io::Write::write_all(&mut out, line.as_bytes())?;
+            std::io::Write::flush(&mut out)?;
         }
     }
     server.shutdown().await;
