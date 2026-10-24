@@ -1,6 +1,6 @@
 {
   "name": "swiftbrowse",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "The AI browser for browser automation and end-to-end testing: JavaScript/TypeScript SDK",
   "license": "Apache-2.0",
   "type": "module",
@@ -43,10 +43,10 @@
     "chromium"
   ],
   "optionalDependencies": {
-    "swiftbrowse-linux-x64": "0.1.0",
-    "swiftbrowse-linux-arm64": "0.1.0",
-    "swiftbrowse-darwin-arm64": "0.1.0",
-    "swiftbrowse-darwin-x64": "0.1.0",
-    "swiftbrowse-windows-x64": "0.1.0"
+    "swiftbrowse-linux-x64": "0.1.1",
+    "swiftbrowse-linux-arm64": "0.1.1",
+    "swiftbrowse-darwin-arm64": "0.1.1",
+    "swiftbrowse-darwin-x64": "0.1.1",
+    "swiftbrowse-windows-x64": "0.1.1"
   }
 }

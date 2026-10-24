@@ -145,6 +145,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           failed=0
+          missing=""
           publish() {
             dir=$1
             name=$(node -p "require('./$dir/package.json').name")
@@ -157,15 +158,21 @@ jobs:
             fi
           }
           for dir in dist/npm/swiftbrowse-*; do
-            publish "$dir" || { echo "::error::$(basename "$dir") was not published"; failed=1; }
+            if ! publish "$dir"; then
+              echo "::error::$(basename "$dir") was not published"
+              failed=1
+              missing="$missing $(basename "$dir")"
+            fi
           done
-          if [ "$DRY_RUN" != "true" ]; then
-            node -e '
-              const fs = require("fs"), { execSync } = require("child_process");
+          # Leave out only platform packages whose publish failed. (A package just
+          # published can still be in npm's staging and not show up yet.)
+          if [ -n "$missing" ]; then
+            MISSING="$missing" node -e '
+              const fs = require("fs");
               const file = "dist/npm/swiftbrowse/package.json", pkg = JSON.parse(fs.readFileSync(file));
-              for (const name of Object.keys(pkg.optionalDependencies)) {
-                try { execSync(`npm view ${name}@${pkg.version} version`, { stdio: "ignore" }); }
-                catch { console.log(`::warning::${name} is not on the registry; left out of swiftbrowse`); delete pkg.optionalDependencies[name]; }
+              for (const name of process.env.MISSING.trim().split(/\s+/)) {
+                console.log(`::warning::${name} was not published; left out of swiftbrowse`);
+                delete pkg.optionalDependencies[name];
               }
               fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");'
           fi
