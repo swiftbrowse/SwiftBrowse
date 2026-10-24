@@ -151,12 +151,23 @@ fn sweep_orphaned_profiles() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    // Signal 0 checks existence; EPERM means it exists but belongs to someone else.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 || *libc_errno() == libc::EPERM }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "linux")]
+unsafe fn libc_errno() -> *mut i32 {
+    libc::__errno_location()
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn libc_errno() -> *mut i32 {
+    libc::__error()
+}
+
+#[cfg(not(unix))]
 fn process_alive(_pid: u32) -> bool {
     // Without a cheap portable check, never delete: leaving a stale profile is safe.
     true
@@ -164,7 +175,7 @@ fn process_alive(_pid: u32) -> bool {
 
 pub enum Transport {
     WebSocket(String),
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     Pipe(tokio::net::unix::pipe::Sender, tokio::net::unix::pipe::Receiver),
 }
 
@@ -176,19 +187,60 @@ pub struct Launched {
     pub stderr_tail: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
-/// `--remote-debugging-pipe` on Linux unless `SWIFTBROWSE_TRANSPORT=websocket`.
+/// `--remote-debugging-pipe` on Linux and macOS unless `SWIFTBROWSE_TRANSPORT=websocket`.
+/// Windows uses a WebSocket on 127.0.0.1: handing the browser pipe handles
+/// needs CRT handle inheritance that std's process API does not expose.
 fn use_pipe() -> bool {
-    cfg!(target_os = "linux") && std::env::var("SWIFTBROWSE_TRANSPORT").map_or(true, |v| v != "websocket")
+    cfg!(unix) && std::env::var("SWIFTBROWSE_TRANSPORT").map_or(true, |v| v != "websocket")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn pipe_pair() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
     use std::os::fd::FromRawFd;
     let mut fds = [0; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+    #[cfg(target_os = "linux")]
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let rc = unsafe {
+        // No pipe2 on macOS: set close-on-exec right after creating the pipe.
+        let rc = libc::pipe(fds.as_mut_ptr());
+        if rc == 0 {
+            libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        rc
+    };
+    if rc != 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(unsafe { (std::os::fd::OwnedFd::from_raw_fd(fds[0]), std::os::fd::OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Windows: put the browser in a job that is killed when this process's job
+/// handle closes, so a crashed or killed SwiftBrowse never leaves it running.
+#[cfg(windows)]
+fn kill_with_parent(child: &Child) {
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    let Some(process) = child.raw_handle() else { return };
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        AssignProcessToJobObject(job, process as _);
+        // The job handle is deliberately kept open for the life of this process.
+    }
 }
 
 pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[String]) -> Result<Launched> {
@@ -201,7 +253,7 @@ pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[Strin
     let pipe = use_pipe();
     // Pipe transport: commands go out the moment the process exists, with no
     // wait for a DevTools server to announce itself and no WebSocket handshake.
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     let pipes = if pipe {
         let (cmd_r, cmd_w) = pipe_pair().map_err(|e| CoreError::backend(format!("cannot create pipe: {e}")))?;
         let (resp_r, resp_w) = pipe_pair().map_err(|e| CoreError::backend(format!("cannot create pipe: {e}")))?;
@@ -266,13 +318,16 @@ pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[Strin
     // If SwiftBrowse dies without cleaning up (SIGKILL, crash), the kernel kills
     // the browser too instead of leaving it orphaned. The signal follows the
     // spawning thread, which is a long-lived runtime worker here.
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
         // The browser reads commands from fd 3 and writes replies to fd 4.
         let child_fds = pipes.as_ref().map(|(cmd_r, _, _, resp_w)| (cmd_r.as_raw_fd(), resp_w.as_raw_fd()));
         unsafe {
             cmd.pre_exec(move || {
+                // On macOS the browser exits when its debugging pipe closes, which
+                // covers the same case without a parent-death signal.
+                #[cfg(target_os = "linux")]
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -290,11 +345,13 @@ pub async fn launch(exe: &Path, headless: bool, no_sandbox: bool, extra: &[Strin
     }
 
     let mut child = cmd.spawn().map_err(|e| CoreError::backend(format!("cannot start {}: {e}", exe.display())))?;
+    #[cfg(windows)]
+    kill_with_parent(&child);
     let stderr = child.stderr.take().expect("piped stderr");
     let mut lines = BufReader::new(stderr).lines();
     let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     if let Some((cmd_r, cmd_w, resp_r, resp_w)) = pipes {
         // The child has its own copies now.
         drop((cmd_r, resp_w));

@@ -2,7 +2,6 @@
 //! session, driven over the Chrome DevTools Protocol.
 
 mod cdp;
-#[cfg(target_os = "linux")]
 pub mod daemon;
 mod keys;
 pub mod launch;
@@ -55,7 +54,7 @@ pub struct ChromiumFactory {
     /// Force `--no-sandbox` on or off; `None` means only when running as root.
     pub no_sandbox: Option<bool>,
     pub extra_args: Vec<String>,
-    /// Attach headless sessions to the warm-browser daemon (Linux).
+    /// Attach headless sessions to the warm-browser daemon.
     pub daemon: DaemonMode,
 }
 
@@ -76,11 +75,10 @@ impl BackendFactory for ChromiumFactory {
     }
 
     async fn launch(&self, options: &SessionOptions) -> Result<Box<dyn Backend>> {
-        #[cfg(target_os = "linux")]
         if let (DaemonMode::Auto { program, args }, true) = (&self.daemon, options.headless) {
             let spawn = (program.clone(), args.clone());
-            if let Some(stream) = daemon::connect_or_spawn(Some(&spawn)).await {
-                match ChromiumBackend::attach_daemon(stream, options).await {
+            if let Some((r, w)) = daemon::connect_or_spawn(Some(&spawn)).await {
+                match ChromiumBackend::attach_daemon(r, w, options).await {
                     Ok(backend) => return Ok(Box::new(backend)),
                     Err(e) => trace_event(&format!("daemon attach failed, launching instead: {}", e.message)),
                 }
@@ -168,7 +166,7 @@ impl ChromiumBackend {
         trace("browser process ready");
         let (cdp, events) = match launched.transport {
             launch::Transport::WebSocket(ref url) => Cdp::connect(url).await?,
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             launch::Transport::Pipe(to_browser, from_browser) => Cdp::over_stream(to_browser, from_browser),
         };
         let stderr_tail = launched.stderr_tail.clone();
@@ -210,10 +208,8 @@ impl ChromiumBackend {
 
     /// Attaches to the warm-browser daemon: takes its spare tab (renderer already
     /// booted) in a fresh browser context, or makes its own context and tab.
-    #[cfg(target_os = "linux")]
-    pub async fn attach_daemon(stream: tokio::net::UnixStream, options: &SessionOptions) -> Result<Self> {
+    pub async fn attach_daemon(r: daemon::BoxRead, w: daemon::BoxWrite, options: &SessionOptions) -> Result<Self> {
         let t0 = Instant::now();
-        let (r, w) = stream.into_split();
         let (cdp, events) = Cdp::over_stream(w, r);
         let (version, spare) = tokio::join!(
             cdp.send("Browser.getVersion", json!({}), None, CMD_TIMEOUT),

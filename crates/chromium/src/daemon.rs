@@ -1,17 +1,22 @@
-//! Warm-browser daemon (Linux).
+//! Warm-browser daemon (Linux, macOS, Windows).
 //!
 //! One long-lived headless browser shared by many SwiftBrowse clients. Clients
-//! connect over a Unix socket in a user-only directory and speak plain CDP
-//! (NUL-delimited JSON). The daemon multiplexes them onto the browser's pipe:
+//! connect over a local endpoint and speak plain CDP (NUL-delimited JSON); the
+//! daemon multiplexes them onto its browser connection:
 //!
 //! - every client works only on browser contexts, tabs and sessions it created
 //!   or claimed; browser-wide commands such as `Browser.close` are refused;
-//! - a spare tab, in its own fresh context with its renderer already booted, is
+//! - a spare tab, in its own fresh context with its session already set up, is
 //!   kept ready; `SwiftBrowse.claimSpare` hands it over and a new one is made;
 //! - a client's contexts (cookies, storage, cache) are disposed when it
 //!   disconnects;
 //! - the daemon exits after an idle timeout, when the browser dies, or on
 //!   `SwiftBrowse.shutdown`; the next client starts a fresh one.
+//!
+//! Access control: clients must present a random token from a file only this
+//! user can read. On Unix the endpoint is a socket in a `0700` directory and the
+//! peer's uid is checked too; on Windows it is a named pipe that rejects remote
+//! clients.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,50 +25,322 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use swiftbrowse_core::{CoreError, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::launch;
 
 pub const ENV_SOCKET: &str = "SWIFTBROWSE_DAEMON_SOCKET";
 
-/// Socket path, versioned so a client never talks to a daemon from another build.
-pub fn socket_path() -> PathBuf {
+pub type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
+pub type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
+
+// ---------- endpoint, token and state files ----------
+
+/// Where the daemon listens: a socket path (Unix) or pipe name (Windows),
+/// versioned so a client never talks to a daemon from another build.
+pub fn endpoint() -> String {
     if let Some(p) = std::env::var_os(ENV_SOCKET) {
-        return PathBuf::from(p);
+        return p.to_string_lossy().into_owned();
     }
-    let dir = match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(runtime) => PathBuf::from(runtime).join("swiftbrowse"),
-        None => std::env::temp_dir().join(format!("swiftbrowse-{}", unsafe { libc::geteuid() })),
-    };
-    dir.join(format!("daemon-{}.sock", env!("CARGO_PKG_VERSION")))
+    #[cfg(unix)]
+    {
+        state_dir().join(format!("daemon-{}.sock", env!("CARGO_PKG_VERSION"))).display().to_string()
+    }
+    #[cfg(windows)]
+    {
+        let user: String = std::env::var("USERNAME")
+            .unwrap_or_default()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        format!(r"\\.\pipe\swiftbrowse-{user}-{}", env!("CARGO_PKG_VERSION"))
+    }
 }
 
-/// Creates the socket directory, readable and writable by this user only.
+/// User-private directory for the token, lock and log files (and the socket on Unix).
+fn state_dir() -> PathBuf {
+    #[cfg(unix)]
+    {
+        if let Some(p) = std::env::var_os(ENV_SOCKET) {
+            if let Some(parent) = Path::new(&p).parent() {
+                return parent.to_path_buf();
+            }
+        }
+        match std::env::var_os("XDG_RUNTIME_DIR") {
+            Some(runtime) => PathBuf::from(runtime).join("swiftbrowse"),
+            None => std::env::temp_dir().join(format!("swiftbrowse-{}", unsafe { libc::geteuid() })),
+        }
+    }
+    #[cfg(windows)]
+    {
+        // %LOCALAPPDATA% is readable by this user, SYSTEM and administrators only.
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("swiftbrowse")
+    }
+}
+
+/// A state file next to the endpoint, e.g. `daemon-0.1.0.token`.
+fn state_file(ext: &str) -> PathBuf {
+    let name: String = endpoint()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("daemon")
+        .trim_end_matches(".sock")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .collect();
+    state_dir().join(format!("{name}.{ext}"))
+}
+
+/// Creates the state directory, accessible to this user only.
 fn private_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-    let meta = std::fs::metadata(dir)?;
-    if meta.uid() != unsafe { libc::geteuid() } {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "socket directory owned by another user",
-        ));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        if std::fs::metadata(dir)?.uid() != unsafe { libc::geteuid() } {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "state directory owned by another user",
+            ));
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
     }
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    #[cfg(windows)]
+    {
+        std::fs::create_dir_all(dir)
+    }
 }
 
-fn same_user(stream: &UnixStream) -> bool {
-    stream.peer_cred().is_ok_and(|c| c.uid() == unsafe { libc::geteuid() })
+fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    std::io::Write::write_all(&mut opts.open(path)?, contents.as_bytes())
 }
 
-/// Connects to a running daemon, checking it runs as this user.
-pub async fn connect() -> Option<UnixStream> {
-    let stream = UnixStream::connect(socket_path()).await.ok()?;
-    same_user(&stream).then_some(stream)
+fn new_token() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|e| CoreError::backend(format!("no randomness for daemon token: {e}")))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+// ---------- platform transport ----------
+
+#[cfg(unix)]
+mod ipc {
+    use super::*;
+    use tokio::net::{UnixListener, UnixStream};
+
+    fn same_user(stream: &UnixStream) -> bool {
+        stream.peer_cred().is_ok_and(|c| c.uid() == unsafe { libc::geteuid() })
+    }
+
+    pub async fn connect_raw() -> Option<(BoxRead, BoxWrite)> {
+        let stream = UnixStream::connect(endpoint()).await.ok()?;
+        if !same_user(&stream) {
+            return None;
+        }
+        let (r, w) = stream.into_split();
+        Some((Box::new(r), Box::new(w)))
+    }
+
+    /// Holds the single-daemon lock for as long as it lives.
+    pub struct Listener {
+        listener: UnixListener,
+        _lock: std::fs::File,
+    }
+
+    impl Listener {
+        /// `Ok(None)` when another daemon already holds the endpoint.
+        pub fn bind() -> Result<Option<Self>> {
+            use std::os::fd::AsRawFd;
+            let lock_path = state_file("lock");
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock_path)
+                .map_err(|e| CoreError::backend(format!("cannot open {}: {e}", lock_path.display())))?;
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return Ok(None);
+            }
+            let path = endpoint();
+            let _ = std::fs::remove_file(&path);
+            let listener =
+                UnixListener::bind(&path).map_err(|e| CoreError::backend(format!("cannot listen on {path}: {e}")))?;
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            Ok(Some(Self { listener, _lock: lock }))
+        }
+
+        pub async fn accept(&mut self) -> std::io::Result<Option<(BoxRead, BoxWrite)>> {
+            let (stream, _) = self.listener.accept().await?;
+            if !same_user(&stream) {
+                return Ok(None);
+            }
+            let (r, w) = stream.into_split();
+            Ok(Some((Box::new(r), Box::new(w))))
+        }
+
+        pub fn remove(&self) {
+            let _ = std::fs::remove_file(endpoint());
+        }
+    }
+
+    /// Starts the daemon detached from the caller's session and signals.
+    pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.spawn().map(|_| ())
+    }
+}
+
+#[cfg(windows)]
+mod ipc {
+    use super::*;
+    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
+
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    pub async fn connect_raw() -> Option<(BoxRead, BoxWrite)> {
+        let name = endpoint();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let client = loop {
+            match ClientOptions::new().open(&name) {
+                Ok(c) => break c,
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(_) => return None,
+            }
+        };
+        let (r, w) = tokio::io::split(client);
+        Some((Box::new(r), Box::new(w)))
+    }
+
+    pub struct Listener {
+        name: String,
+        next: NamedPipeServer,
+    }
+
+    impl Listener {
+        /// `Ok(None)` when another daemon already owns the pipe name.
+        pub fn bind() -> Result<Option<Self>> {
+            let name = endpoint();
+            match ServerOptions::new().first_pipe_instance(true).reject_remote_clients(true).create(&name) {
+                Ok(next) => Ok(Some(Self { name, next })),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(None),
+                Err(e) => Err(CoreError::backend(format!("cannot create pipe {name}: {e}"))),
+            }
+        }
+
+        pub async fn accept(&mut self) -> std::io::Result<Option<(BoxRead, BoxWrite)>> {
+            self.next.connect().await?;
+            let fresh = ServerOptions::new().reject_remote_clients(true).create(&self.name)?;
+            let connected = std::mem::replace(&mut self.next, fresh);
+            let (r, w) = tokio::io::split(connected);
+            Ok(Some((Box::new(r), Box::new(w))))
+        }
+
+        pub fn remove(&self) {}
+    }
+
+    /// Starts the daemon detached from the caller's console.
+    pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP).spawn().map(|_| ())
+    }
+}
+
+// ---------- client side ----------
+
+/// Connects to a running daemon and authenticates with its token.
+pub async fn connect() -> Option<(BoxRead, BoxWrite)> {
+    let token = std::fs::read_to_string(state_file("token")).ok()?;
+    let (mut r, mut w) = ipc::connect_raw().await?;
+    let mut hello =
+        json!({ "id": 0, "method": "SwiftBrowse.hello", "params": { "token": token.trim() } }).to_string().into_bytes();
+    hello.push(0);
+    w.write_all(&hello).await.ok()?;
+    let reply = read_one(&mut r).await?;
+    reply.get("result").is_some().then_some((r, w))
+}
+
+async fn read_one(r: &mut BoxRead) -> Option<Value> {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    // Byte-wise until the NUL so nothing after the reply is consumed here.
+    loop {
+        if r.read(&mut byte).await.ok()? == 0 {
+            return None;
+        }
+        if byte[0] == 0 {
+            return serde_json::from_slice(&buf).ok();
+        }
+        buf.push(byte[0]);
+    }
+}
+
+/// One request to the daemon itself (`SwiftBrowse.status`, `SwiftBrowse.shutdown`).
+pub async fn call(method: &str) -> Option<Value> {
+    let (mut r, mut w) = connect().await?;
+    let mut msg = json!({ "id": 1, "method": method }).to_string().into_bytes();
+    msg.push(0);
+    w.write_all(&msg).await.ok()?;
+    let reply = read_one(&mut r).await?;
+    Some(reply.get("result").cloned().unwrap_or_else(|| json!({ "error": reply.get("error") })))
+}
+
+/// Sends one raw message after authenticating and returns the reply (diagnostics, tests).
+pub async fn raw(msg: Value) -> Option<Value> {
+    let (mut r, mut w) = connect().await?;
+    let mut bytes = msg.to_string().into_bytes();
+    bytes.push(0);
+    w.write_all(&bytes).await.ok()?;
+    read_one(&mut r).await
+}
+
+/// Starts a daemon in the background so it outlives the process that started it.
+pub fn spawn_detached(program: &Path, args: &[String]) -> std::io::Result<()> {
+    private_dir(&state_dir())?;
+    let stderr = std::fs::OpenOptions::new().create(true).append(true).open(state_file("log"))?;
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(stderr);
+    ipc::spawn_detached(&mut cmd)
+}
+
+/// Connects to the daemon, starting it first when `spawn` says how.
+pub async fn connect_or_spawn(spawn: Option<&(PathBuf, Vec<String>)>) -> Option<(BoxRead, BoxWrite)> {
+    if let Some(c) = connect().await {
+        return Some(c);
+    }
+    let (program, args) = spawn?;
+    spawn_detached(program, args).ok()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let Some(c) = connect().await {
+            return Some(c);
+        }
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+    None
+}
+
+// ---------- daemon core ----------
 pub struct DaemonOptions {
     pub executable: Option<PathBuf>,
     pub idle_timeout: Duration,
@@ -365,8 +642,8 @@ impl Daemon {
     }
 }
 
-/// Splits NUL-delimited messages out of a byte stream.
-async fn read_messages<R: tokio::io::AsyncRead + Unpin>(mut r: R, mut each: impl FnMut(&str)) {
+/// Splits NUL-delimited messages out of a byte stream. `each` returns false to stop.
+async fn read_messages<R: AsyncRead + Unpin>(mut r: R, mut each: impl FnMut(&str) -> bool) {
     let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
@@ -377,7 +654,9 @@ async fn read_messages<R: tokio::io::AsyncRead + Unpin>(mut r: R, mut each: impl
                 let mut start = 0;
                 while let Some(end) = buf[start..].iter().position(|b| *b == 0) {
                     if let Ok(text) = std::str::from_utf8(&buf[start..start + end]) {
-                        each(text);
+                        if !each(text) {
+                            return;
+                        }
                     }
                     start += end + 1;
                 }
@@ -387,7 +666,7 @@ async fn read_messages<R: tokio::io::AsyncRead + Unpin>(mut r: R, mut each: impl
     }
 }
 
-async fn write_messages<W: tokio::io::AsyncWrite + Unpin>(mut w: W, mut rx: mpsc::UnboundedReceiver<String>) {
+async fn write_messages<W: AsyncWrite + Unpin>(mut w: W, mut rx: mpsc::UnboundedReceiver<String>) {
     while let Some(msg) = rx.recv().await {
         let mut bytes = msg.into_bytes();
         bytes.push(0);
@@ -397,26 +676,55 @@ async fn write_messages<W: tokio::io::AsyncWrite + Unpin>(mut w: W, mut rx: mpsc
     }
 }
 
+/// Raw message channels to the browser: its debugging pipe (Unix) or local
+/// WebSocket (Windows). The second channel closes when the browser goes away.
+async fn browser_link(
+    transport: launch::Transport,
+) -> Result<(mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>)> {
+    let (to_tx, to_rx) = mpsc::unbounded_channel::<String>();
+    let (from_tx, from_rx) = mpsc::unbounded_channel::<String>();
+    match transport {
+        #[cfg(unix)]
+        launch::Transport::Pipe(w, r) => {
+            tokio::spawn(write_messages(w, to_rx));
+            tokio::spawn(async move { read_messages(r, |t| from_tx.send(t.to_string()).is_ok()).await });
+        }
+        launch::Transport::WebSocket(url) => {
+            use futures_util::{SinkExt, StreamExt};
+            use tokio_tungstenite::tungstenite::Message;
+            let (ws, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .map_err(|e| CoreError::backend(format!("cannot connect to the browser: {e}")))?;
+            let (mut sink, mut stream) = ws.split();
+            let mut to_rx = to_rx;
+            tokio::spawn(async move {
+                while let Some(msg) = to_rx.recv().await {
+                    if sink.send(Message::Text(msg.into())).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            tokio::spawn(async move {
+                while let Some(Ok(msg)) = stream.next().await {
+                    if let Message::Text(t) = msg {
+                        if from_tx.send(t.as_str().to_string()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    }
+    Ok((to_tx, from_rx))
+}
+
 /// Runs the daemon until idle timeout, browser exit or shutdown request.
 pub async fn run(options: DaemonOptions) -> Result<()> {
-    let path = socket_path();
-    let dir = path.parent().unwrap_or(Path::new("/tmp")).to_path_buf();
+    let dir = state_dir();
     private_dir(&dir).map_err(|e| CoreError::backend(format!("cannot prepare {}: {e}", dir.display())))?;
-
-    // One daemon per socket: an exclusive lock decides races between clients
-    // that start one at the same moment.
-    let lock_path = path.with_extension("lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|e| CoreError::backend(format!("cannot open {}: {e}", lock_path.display())))?;
-    use std::os::fd::AsRawFd;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    let Some(mut listener) = ipc::Listener::bind()? else {
         return Ok(()); // another daemon is running
-    }
-    let _ = std::fs::remove_file(&path);
+    };
 
     let exe = options
         .executable
@@ -425,20 +733,15 @@ pub async fn run(options: DaemonOptions) -> Result<()> {
         .or_else(launch::discover)
         .ok_or_else(|| CoreError::unsupported("no Chromium found"))?;
     let launched = launch::launch(&exe, true, options.no_sandbox, &[]).await?;
-    let launch::Transport::Pipe(to_browser, from_browser) = launched.transport else {
-        return Err(CoreError::unsupported("the daemon needs pipe transport"));
-    };
     let mut child = launched.child;
     let _profile = launched.profile;
+    let (browser_tx, mut browser_rx) = browser_link(launched.transport).await?;
 
-    let listener = UnixListener::bind(&path)
-        .map_err(|e| CoreError::backend(format!("cannot listen on {}: {e}", path.display())))?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    // Clients must present this token, readable only by this user.
+    let token = new_token()?;
+    let token_path = state_file("token");
+    write_private(&token_path, &token).map_err(|e| CoreError::backend(format!("cannot write token: {e}")))?;
 
-    let (browser_tx, browser_rx) = mpsc::unbounded_channel::<String>();
     let daemon = Daemon {
         state: Arc::new(Mutex::new(State { last_activity: Some(Instant::now()), ..State::default() })),
         browser: browser_tx,
@@ -446,13 +749,14 @@ pub async fn run(options: DaemonOptions) -> Result<()> {
         started: Instant::now(),
         version: Arc::default(),
     };
-    tokio::spawn(write_messages(to_browser, browser_rx));
     let browser_gone = Arc::new(tokio::sync::Notify::new());
     {
         let d = daemon.clone();
         let gone = browser_gone.clone();
         tokio::spawn(async move {
-            read_messages(from_browser, |text| d.on_browser_message(text)).await;
+            while let Some(text) = browser_rx.recv().await {
+                d.on_browser_message(&text);
+            }
             gone.notify_one();
         });
     }
@@ -470,25 +774,40 @@ pub async fn run(options: DaemonOptions) -> Result<()> {
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { continue };
-                if !same_user(&stream) {
-                    continue;
-                }
+                let Ok(Some((r, w))) = accepted else { continue };
                 let d = daemon.clone();
-                let (tx, rx) = mpsc::unbounded_channel::<String>();
-                let client = {
-                    let mut st = d.state.lock().unwrap();
-                    st.next_client += 1;
-                    let client = st.next_client;
-                    st.clients.insert(client, tx);
-                    st.last_activity = Some(Instant::now());
-                    client
-                };
-                let (r, w) = stream.into_split();
-                tokio::spawn(write_messages(w, rx));
+                let token = token.clone();
                 tokio::spawn(async move {
-                    read_messages(r, |text| d.on_client_message(client, text)).await;
-                    d.disconnected(client).await;
+                    let (tx, rx) = mpsc::unbounded_channel::<String>();
+                    tokio::spawn(write_messages(w, rx));
+                    // Not registered as a client until it presents the token.
+                    let mut client: Option<u64> = None;
+                    read_messages(r, |text| match client {
+                        Some(c) => {
+                            d.on_client_message(c, text);
+                            true
+                        }
+                        None => {
+                            let msg: Value = serde_json::from_str(text).unwrap_or_default();
+                            let ok = msg["method"] == "SwiftBrowse.hello" && msg["params"]["token"].as_str() == Some(token.as_str());
+                            if !ok {
+                                return false;
+                            }
+                            let mut st = d.state.lock().unwrap();
+                            st.next_client += 1;
+                            let c = st.next_client;
+                            st.clients.insert(c, tx.clone());
+                            st.last_activity = Some(Instant::now());
+                            drop(st);
+                            let _ = tx.send(json!({ "id": msg["id"], "result": {} }).to_string());
+                            client = Some(c);
+                            true
+                        }
+                    })
+                    .await;
+                    if let Some(c) = client {
+                        d.disconnected(c).await;
+                    }
                 });
             }
             _ = idle.tick() => {
@@ -502,47 +821,11 @@ pub async fn run(options: DaemonOptions) -> Result<()> {
             _ = browser_gone.notified() => break,
         }
     }
-    let _ = std::fs::remove_file(&path);
+    listener.remove();
+    let _ = std::fs::remove_file(&token_path);
     let _ = tokio::time::timeout(Duration::from_secs(2), daemon.internal("Browser.close", json!({}))).await;
     if tokio::time::timeout(Duration::from_secs(5), child.wait()).await.is_err() {
         let _ = child.kill().await;
     }
     Ok(())
-}
-
-/// Starts a daemon in the background, detached from the caller's session and
-/// signals, so it outlives the process that started it.
-pub fn spawn_detached(program: &Path, args: &[String]) -> std::io::Result<()> {
-    use std::os::unix::process::CommandExt;
-    let log = socket_path().with_extension("log");
-    if let Some(dir) = log.parent() {
-        private_dir(dir)?;
-    }
-    let stderr = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(stderr);
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    cmd.spawn().map(|_| ())
-}
-
-/// Connects to the daemon, starting it first when `spawn` says how.
-pub async fn connect_or_spawn(spawn: Option<&(PathBuf, Vec<String>)>) -> Option<UnixStream> {
-    if let Some(s) = connect().await {
-        return Some(s);
-    }
-    let (program, args) = spawn?;
-    spawn_detached(program, args).ok()?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if let Some(s) = connect().await {
-            return Some(s);
-        }
-        tokio::time::sleep(Duration::from_millis(3)).await;
-    }
-    None
 }

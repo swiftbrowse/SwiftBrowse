@@ -31,7 +31,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Pinned Chromium build, same as the benchmark's Playwright version.
-      - run: npx -y playwright@1.64.0 install --with-deps chromium
+      - run: npx -y playwright@1.64.0 install --with-deps chromium chromium-headless-shell
       - run: cargo run -q -p swiftbrowse-cli -- doctor
       - run: cargo test --workspace
 
@@ -44,9 +44,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Core, MCP and CLI build and unit tests; browser integration runs on Linux.
-      - run: cargo test --workspace --exclude swiftbrowse-chromium
-      - run: cargo build -p swiftbrowse-chromium
+      - run: npx -y playwright@1.64.0 install chromium chromium-headless-shell
+      - run: cargo run -q -p swiftbrowse-cli -- doctor
+      - run: cargo test --workspace
 
   bench:
     if: github.event_name == 'workflow_dispatch' && inputs.bench

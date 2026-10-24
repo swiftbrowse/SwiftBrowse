@@ -60,7 +60,7 @@ enum Command {
         #[command(flatten)]
         common: Common,
     },
-    /// Manage the warm-browser daemon that headless sessions attach to (Linux).
+    /// Manage the warm-browser daemon that headless sessions attach to.
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -138,7 +138,7 @@ impl Common {
     fn daemon_mode(&self) -> DaemonMode {
         let off = self.no_daemon || self.headed || std::env::var("SWIFTBROWSE_DAEMON").is_ok_and(|v| v == "off");
         match std::env::current_exe() {
-            Ok(program) if !off && cfg!(target_os = "linux") => {
+            Ok(program) if !off => {
                 let mut args = vec!["daemon".to_string(), "run".to_string()];
                 if let Some(c) = &self.chromium {
                     args.extend(["--chromium".to_string(), c.display().to_string()]);
@@ -314,28 +314,6 @@ async fn run_script(path: &PathBuf, common: &Common) -> ExitCode {
     }
 }
 
-#[cfg(target_os = "linux")]
-async fn daemon_request(method: &str) -> Option<Value> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = swiftbrowse_chromium::daemon::connect().await?;
-    let mut msg = json!({ "id": 1, "method": method }).to_string().into_bytes();
-    msg.push(0);
-    stream.write_all(&msg).await.ok()?;
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let n = stream.read(&mut chunk).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if let Some(end) = buf.iter().position(|b| *b == 0) {
-            return serde_json::from_slice::<Value>(&buf[..end]).ok().map(|v| v["result"].clone());
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
 async fn daemon_command(action: DaemonAction) -> ExitCode {
     use swiftbrowse_chromium::daemon;
     match action {
@@ -353,25 +331,20 @@ async fn daemon_command(action: DaemonAction) -> ExitCode {
                 }
             }
         }
-        DaemonAction::Status => match daemon_request("SwiftBrowse.status").await {
+        DaemonAction::Status => match daemon::call("SwiftBrowse.status").await {
             Some(status) => {
-                print(&json!({ "running": true, "socket": daemon::socket_path(), "status": status }));
+                print(&json!({ "running": true, "endpoint": daemon::endpoint(), "status": status }));
                 ExitCode::SUCCESS
             }
             None => {
-                print(&json!({ "running": false, "socket": daemon::socket_path() }));
+                print(&json!({ "running": false, "endpoint": daemon::endpoint() }));
                 ExitCode::FAILURE
             }
         },
         DaemonAction::Stop => {
-            let stopped = daemon_request("SwiftBrowse.shutdown").await.is_some();
+            let stopped = daemon::call("SwiftBrowse.shutdown").await.is_some();
             print(&json!({ "stopped": stopped }));
             ExitCode::SUCCESS
         }
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn daemon_command(_action: DaemonAction) -> ExitCode {
-    fail("the warm-browser daemon is only available on Linux")
 }

@@ -13,7 +13,7 @@ cargo build --release
 ./target/release/swiftbrowse mcp               # MCP server on stdio
 ```
 
-`doctor` finds Chromium via `SWIFTBROWSE_CHROMIUM`, then Playwright-managed builds (`npx playwright install chromium`), then standard install locations and `PATH`. Headless sessions prefer Chromium's headless shell (`npx playwright install chromium-headless-shell`), which starts about 3× faster. On Linux, SwiftBrowse talks to the browser over a pipe, so no local debugging port is opened; set `SWIFTBROWSE_TRANSPORT=websocket` to use a port instead.
+`doctor` finds Chromium via `SWIFTBROWSE_CHROMIUM`, then Playwright-managed builds (`npx playwright install chromium`), then standard install locations and `PATH`. Headless sessions prefer Chromium's headless shell (`npx playwright install chromium-headless-shell`), which starts about 3× faster. On Linux and macOS, SwiftBrowse talks to the browser over a pipe, so no local debugging port is opened; set `SWIFTBROWSE_TRANSPORT=websocket` to use a port instead.
 
 MCP client config:
 
@@ -21,13 +21,13 @@ MCP client config:
 { "mcpServers": { "swiftbrowse": { "command": "/path/to/swiftbrowse", "args": ["mcp"] } } }
 ```
 
-## Warm-browser daemon (Linux)
+## Warm-browser daemon (Linux, macOS, Windows)
 
 The first headless session starts a background `swiftbrowse daemon` holding one Chromium. That first start costs the same as before (~160 ms to a loaded page). After that, every new session (a new CLI run, a new MCP server, `session_create`) attaches to the warm browser instead of launching one: **~52 ms from process start to a loaded page.**
 
 - **Spare tab:** the daemon always keeps a spare tab ready, in a fresh browser context with its renderer booted and the session already set up (events, network, helper script, viewport). A new session takes it and navigates immediately, and the daemon prepares the next spare.
 - **Isolation:** one browser context per session, with separate cookies, storage and cache. Contexts are disposed when the session closes or its process disconnects. A client can only use the contexts, tabs and sessions it created or claimed; browser-wide commands (`Browser.close`, `Target.getTargets`, …) are refused.
-- **Access:** a Unix socket in a `0700` directory (`$XDG_RUNTIME_DIR/swiftbrowse/` or `/tmp/swiftbrowse-<uid>/`), with the peer's user id checked. No TCP port.
+- **Access:** on Linux and macOS, a Unix socket in a `0700` directory (`$XDG_RUNTIME_DIR/swiftbrowse/` or `/tmp/swiftbrowse-<uid>/`), with the peer's user id checked, and the browser on a pipe: no TCP port at all. On Windows, a named pipe that refuses remote clients; the daemon reaches its browser over a localhost DevTools WebSocket, and a job object kills the browser with the daemon. Everywhere, a client must first present a random token stored in the user's private state directory, or it is dropped.
 - **Lifetime:** the daemon exits after 10 idle minutes, when its browser dies, or on `swiftbrowse daemon stop`; the next session starts a fresh one. The socket name includes the version, so clients never mix builds.
 - **Trade-off:** sessions share one browser *process* and are separated by browser context, not by process. The capability report says so for daemon sessions. Use `--no-daemon` (or `SWIFTBROWSE_DAEMON=off`) for one browser process per session. Headed sessions never use the daemon.
 
@@ -154,7 +154,7 @@ Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse
 | Chromium backend (`crates/chromium`) | CDP over WebSocket, per-session process + profile, isolated-world helper, trusted input, diagnostics, screenshots, AX tree |
 | MCP server (`crates/mcp`) | stdio, protocol 2024-11-05 / 2025-03-26 / 2025-06-18, generated schemas, output bounded to 256 KB |
 | CLI (`crates/cli`) | `doctor`, `capabilities`, `run`, `snapshot`, `screenshot`, `mcp`, `daemon run/status/stop` |
-| Warm-browser daemon (`crates/chromium/src/daemon.rs`) | Linux; spare prepared tabs, per-client ownership, idle exit |
+| Warm-browser daemon (`crates/chromium/src/daemon.rs`) | Linux, macOS, Windows; spare prepared tabs, per-client ownership, token auth, idle exit |
 | Tests | 23 core/MCP unit and engine tests, 4 real-browser integration suites, 1 signal-cleanup test and 1 daemon test (speed, isolation, refusals, cleanup) of the real binary, 1 key-mapping test |
 | CI (`.github/workflows/ci.yml`) | written, **not yet run** |
 | Desktop shell (Tauri/Wry) | not started; `doctor` reports WebView availability |

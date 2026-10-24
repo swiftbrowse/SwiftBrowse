@@ -28,7 +28,7 @@
 - Same Chromium version, about 3× faster process start (51 vs 146 ms). Cold start to first page: 419 → ~160 ms. Playwright's own library uses it by default too, so benchmarks give both tools the same binary (`--browser shell|full`).
 - **Reversibility:** two-way door (`SWIFTBROWSE_CHROMIUM` overrides; headed sessions use full Chrome).
 
-## 2026-10-24 · Pipe transport on Linux
+## 2026-10-24 · Pipe transport on Linux (and macOS since the daemon port)
 - Measured no speed gain over WebSocket (161 vs 164 ms cold), but it opens no local TCP debugging port that other local processes could use to drive the browser. Kept for security. WebSocket remains for other platforms and via `SWIFTBROWSE_TRANSPORT=websocket`.
 
 ## 2026-10-24 · Cold start: stop at Chromium's floor
@@ -40,3 +40,10 @@
 - **Result:** first run ~160 ms (unchanged); later runs ~52 ms to a loaded page (Playwright MCP ~704 ms, Playwright library ~155 ms).
 - **Trade-off:** sessions are isolated by browser context, not by process (the capability report says so). `--no-daemon` / `SWIFTBROWSE_DAEMON=off` restores one process per session.
 - **Reversibility:** two-way door (the default can flip to off without breaking anything).
+
+## 2026-10-24 · Daemon on macOS and Windows
+- **Asked for:** the warm daemon on the remaining two platforms.
+- **Built:** macOS reuses the Unix path (socket, uid check, pipe to the browser; Chromium exits when its pipe closes, standing in for Linux's parent-death signal). Windows uses a named pipe (first instance only, remote clients rejected), a localhost WebSocket to the browser, a job object that kills the browser with the daemon, and a detached process. All platforms now require a per-user random token in a hello message before any command is routed.
+- **Evidence:** clippy is clean for x86_64/aarch64 macOS and x86_64 Windows; the daemon test is portable and runs in CI on all three. Runtime on macOS and Windows is proven only once CI runs; it was not run locally.
+- **Trade-off:** on Windows the browser listens on a localhost debugging port (random, not the daemon's endpoint), which other local processes of any user could reach. Chromium can take its pipe on Windows too, but that needs inheritable handles passed the way the C runtime expects, which Rust's standard library doesn't do; a follow-up if the port matters.
+- **Reversibility:** two-way door (`--no-daemon` everywhere).
