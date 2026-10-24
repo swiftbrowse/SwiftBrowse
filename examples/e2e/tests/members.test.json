@@ -1,0 +1,22 @@
+{
+  "name": "members",
+  "storage_state": "member",
+  "tests": [
+    {
+      "name": "starts logged in",
+      "steps": [
+        { "op": "navigate", "url": "members.html" },
+        { "op": "expect", "condition": { "type": "text_visible", "text": "Members area for Ada" } }
+      ]
+    },
+    {
+      "name": "each test gets its own copy of the state",
+      "steps": [
+        { "op": "navigate", "url": "members.html" },
+        { "op": "evaluate", "expression": "localStorage.setItem('member_name', 'Changed')" },
+        { "op": "reload" },
+        { "op": "expect", "condition": { "type": "text_visible", "text": "Members area for Changed" } }
+      ]
+    }
+  ]
+}

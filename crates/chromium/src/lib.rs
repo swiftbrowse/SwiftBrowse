@@ -559,6 +559,22 @@ impl ChromiumBackend {
         serde_json::from_value(r["result"]["value"].clone()).map_err(|e| CoreError::backend(e.to_string()))
     }
 
+    /// Navigates and waits for DOMContentLoaded only: for internal pages, without
+    /// the render settling that `navigate` does for real ones.
+    async fn navigate_bare(&mut self, url: &str) -> Result<()> {
+        self.leave_frames();
+        let r = self.send("Page.navigate", json!({ "url": url })).await?;
+        let error = s(&r, "errorText");
+        if !error.is_empty() {
+            return Err(CoreError::new(ErrorKind::NavigationFailed, format!("{url}: {error}")));
+        }
+        let loader = s(&r, "loaderId");
+        if !loader.is_empty() {
+            self.wait_lifecycle(&loader, "DOMContentLoaded", Duration::from_secs(10)).await?;
+        }
+        Ok(())
+    }
+
     fn tab_sessions(&self) -> Vec<String> {
         std::iter::once(&self.tab).chain(&self.others).map(|t| t.session.clone()).collect()
     }
@@ -1480,6 +1496,113 @@ impl Backend for ChromiumBackend {
             return Err(js_error(ex));
         }
         Ok(r["result"].get("value").cloned().unwrap_or(Value::Null))
+    }
+
+    async fn storage_state(&mut self) -> Result<Value> {
+        let mut params = json!({});
+        if let Some(ctx) = &self.daemon_context {
+            params["browserContextId"] = json!(ctx);
+        }
+        let r = self.cdp.send("Storage.getCookies", params, None, CMD_TIMEOUT).await?;
+        let cookies: Vec<Value> = r["cookies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| {
+                json!({
+                    "name": c["name"], "value": c["value"], "domain": c["domain"], "path": c["path"],
+                    "expires": c["expires"], "httpOnly": c["httpOnly"], "secure": c["secure"],
+                    "sameSite": c.get("sameSite").and_then(Value::as_str).unwrap_or("Lax"),
+                })
+            })
+            .collect();
+        // localStorage of every origin open in this session's tabs.
+        let mut origins: Vec<Value> = Vec::new();
+        let expr = "(() => { try { return { origin: location.origin, items: Object.entries(localStorage) }; } catch (e) { return null; } })()";
+        for session in self.tab_sessions() {
+            let params = json!({ "expression": expr, "returnByValue": true });
+            let Ok(r) = self.cdp.send("Runtime.evaluate", params, Some(&session), CMD_TIMEOUT).await else { continue };
+            let v = &r["result"]["value"];
+            let origin = s(v, "origin");
+            if !origin.starts_with("http") || origins.iter().any(|o| s(o, "origin") == origin) {
+                continue;
+            }
+            let items: Vec<Value> = v["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|kv| json!({ "name": kv[0], "value": kv[1] }))
+                .collect();
+            if !items.is_empty() {
+                origins.push(json!({ "origin": origin, "localStorage": items }));
+            }
+        }
+        Ok(json!({ "cookies": cookies, "origins": origins }))
+    }
+
+    async fn set_storage_state(&mut self, state: &Value) -> Result<()> {
+        let cookies: Vec<Value> = state["cookies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| {
+                let mut p = json!({
+                    "name": c["name"], "value": c["value"], "domain": c["domain"],
+                    "path": c.get("path").cloned().unwrap_or(json!("/")),
+                    "secure": c["secure"].as_bool().unwrap_or(false),
+                    "httpOnly": c["httpOnly"].as_bool().unwrap_or(false),
+                });
+                if let Some(same) = c["sameSite"].as_str() {
+                    p["sameSite"] = json!(same);
+                }
+                // -1 (or missing) is a session cookie.
+                if let Some(exp) = c["expires"].as_f64().filter(|e| *e > 0.0) {
+                    p["expires"] = json!(exp);
+                }
+                p
+            })
+            .collect();
+        if !cookies.is_empty() {
+            let mut params = json!({ "cookies": cookies });
+            if let Some(ctx) = &self.daemon_context {
+                params["browserContextId"] = json!(ctx);
+            }
+            self.cdp.send("Storage.setCookies", params, None, CMD_TIMEOUT).await?;
+        }
+        // localStorage can only be written from a document of its origin: load an
+        // intercepted blank page there (never reaching the network), write, move on.
+        let mut seeded = false;
+        for o in state["origins"].as_array().into_iter().flatten() {
+            let origin = s(o, "origin");
+            let items = o["localStorage"].as_array().cloned().unwrap_or_default();
+            if !origin.starts_with("http") || items.is_empty() {
+                continue;
+            }
+            let seed = format!("{}/__swiftbrowse_seed__", origin.trim_end_matches('/'));
+            let route = swiftbrowse_core::request::RouteArgs {
+                url_regex: Some(format!("^{}$", regex::escape(&seed))),
+                body: Some("<!doctype html><title></title>".into()),
+                headers: [("content-type".to_string(), "text/html".to_string())].into(),
+                times: Some(1),
+                ..Default::default()
+            };
+            self.add_route(route).await?;
+            self.navigate_bare(&seed).await?;
+            let pairs: Vec<(Value, Value)> = items.iter().map(|kv| (kv["name"].clone(), kv["value"].clone())).collect();
+            let expr = format!("for (const [k, v] of {}) localStorage.setItem(k, v); true", json!(pairs));
+            self.send("Runtime.evaluate", json!({ "expression": expr })).await?;
+            seeded = true;
+        }
+        if seeded {
+            self.navigate_bare("about:blank").await?;
+            self.shared.requests.lock().unwrap().retain(|r| !r.url.contains("/__swiftbrowse_seed__"));
+            if self.shared.mocks.lock().unwrap().is_empty() {
+                for session in self.tab_sessions() {
+                    let _ = self.cdp.send("Fetch.disable", json!({}), Some(&session), CMD_TIMEOUT).await;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn add_route(&mut self, route: swiftbrowse_core::request::RouteArgs) -> Result<String> {

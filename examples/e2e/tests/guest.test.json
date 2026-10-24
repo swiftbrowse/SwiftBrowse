@@ -1,0 +1,12 @@
+{
+  "name": "guests",
+  "tests": [
+    {
+      "name": "are not members",
+      "steps": [
+        { "op": "navigate", "url": "members.html" },
+        { "op": "expect", "condition": { "type": "text_visible", "text": "Members only" } }
+      ]
+    }
+  ]
+}

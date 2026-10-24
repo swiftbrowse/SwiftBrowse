@@ -584,6 +584,8 @@ impl Daemon {
                     "Target.createTarget" => owns_ctx("browserContextId"),
                     "Target.attachToTarget" | "Target.closeTarget" => owns_target("targetId"),
                     "Target.disposeBrowserContext" => owns_ctx("browserContextId"),
+                    // Saved logins: only with the client's own context named.
+                    "Storage.getCookies" | "Storage.setCookies" => owns_ctx("browserContextId"),
                     _ => false,
                 },
             };

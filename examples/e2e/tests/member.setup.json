@@ -1,0 +1,14 @@
+{
+  "name": "member login",
+  "tests": [
+    {
+      "name": "joins and saves the logged-in state",
+      "steps": [
+        { "op": "navigate", "url": "join.html" },
+        { "op": "fill", "target": "Your name", "value": "Ada" },
+        { "op": "click", "target": { "by": "role", "role": "button", "name": "Join" }, "expect": { "type": "text_visible", "text": "Members area for Ada" } },
+        { "op": "save_storage_state", "name": "member" }
+      ]
+    }
+  ]
+}

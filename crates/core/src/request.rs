@@ -337,6 +337,14 @@ pub fn glob_to_regex(glob: &str) -> String {
     out
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StorageStateArgs {
+    /// Name of the saved state (letters, digits, '-', '_', '.'); stored as
+    /// `<name>.json` in the state directory, in Playwright's storageState format.
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnrouteArgs {
@@ -463,6 +471,8 @@ pub enum Request {
     GoForward(HistoryArgs),
     Reload(HistoryArgs),
     Evaluate(EvaluateArgs),
+    SaveStorageState(StorageStateArgs),
+    LoadStorageState(StorageStateArgs),
     Route(RouteArgs),
     Unroute(UnrouteArgs),
     ListRoutes(NoArgs),
@@ -501,6 +511,8 @@ impl Request {
             Request::GoForward(_) => "go_forward",
             Request::Reload(_) => "reload",
             Request::Evaluate(_) => "evaluate",
+            Request::SaveStorageState(_) => "save_storage_state",
+            Request::LoadStorageState(_) => "load_storage_state",
             Request::Route(_) => "route",
             Request::Unroute(_) => "unroute",
             Request::ListRoutes(_) => "list_routes",
@@ -564,6 +576,8 @@ pub fn op_specs() -> Vec<OpSpec> {
         OpSpec { name: "go_forward", description: "Go forward one history entry and wait for the page to load.", schema: schema_of::<HistoryArgs> },
         OpSpec { name: "reload", description: "Reload the page and wait for it to load.", schema: schema_of::<HistoryArgs> },
         OpSpec { name: "evaluate", description: "Run a JavaScript expression in the page and return its JSON result. Only available when the session policy allows scripts (the test runner does; MCP needs --allow-evaluate).", schema: schema_of::<EvaluateArgs> },
+        OpSpec { name: "save_storage_state", description: "Save this session's cookies and the localStorage of its open origins (a logged-in state) under a name, in Playwright's storageState format.", schema: schema_of::<StorageStateArgs> },
+        OpSpec { name: "load_storage_state", description: "Restore a saved state (cookies and localStorage) into this session, e.g. to start logged in.", schema: schema_of::<StorageStateArgs> },
         OpSpec { name: "route", description: "Mock the network: requests matching a URL glob or regex (and method) are fulfilled with a status/body/JSON, aborted with a network error, or let through. Newest route wins; times limits uses.", schema: schema_of::<RouteArgs> },
         OpSpec { name: "unroute", description: "Remove a route by id, or all routes.", schema: schema_of::<UnrouteArgs> },
         OpSpec { name: "list_routes", description: "Active routes with how often each matched.", schema: schema_of::<NoArgs> },

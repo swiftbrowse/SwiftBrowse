@@ -528,6 +528,34 @@ impl Session {
                 }
                 Ok(Some(json!({ "files": selected })))
             }
+            Request::SaveStorageState(a) => {
+                let path = p.state_path(&a.name)?;
+                let state = self.backend.storage_state().await?;
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)
+                        .map_err(|e| CoreError::backend(format!("cannot create {}: {e}", dir.display())))?;
+                }
+                // Session cookies are credentials: readable by this user only.
+                write_private(&path, &serde_json::to_vec_pretty(&state).unwrap_or_default())
+                    .map_err(|e| CoreError::backend(format!("cannot write {}: {e}", path.display())))?;
+                let count = |k: &str| state[k].as_array().map_or(0, Vec::len);
+                Ok(Some(json!({ "path": path, "cookies": count("cookies"), "origins": count("origins") })))
+            }
+            Request::LoadStorageState(a) => {
+                let path = p.state_path(&a.name)?;
+                let text = std::fs::read_to_string(&path).map_err(|_| {
+                    CoreError::new(
+                        ErrorKind::NotFound,
+                        format!("no saved state {:?}; save_storage_state first", a.name),
+                    )
+                })?;
+                let state: Value = serde_json::from_str(&text)
+                    .map_err(|_| CoreError::invalid(format!("saved state {:?} is not valid JSON", a.name)))?;
+                self.backend.set_storage_state(&state).await?;
+                self.last_snapshot = None;
+                let count = |k: &str| state[k].as_array().map_or(0, Vec::len);
+                Ok(Some(json!({ "cookies": count("cookies"), "origins": count("origins") })))
+            }
             Request::Route(a) => {
                 a.matcher()?;
                 if a.action == RouteAction::Fulfill && a.body.is_some() && a.json.is_some() {
@@ -1032,4 +1060,16 @@ fn select(matches: Vec<ElementInfo>, strategy: String, nth: Option<usize>) -> Re
         None => pool.into_iter().next().expect("non-empty"),
     };
     Ok(ResolvedTarget { element, strategy, candidates })
+}
+
+/// Writes a file only this user can read (on Unix; Windows uses the directory's ACL).
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    std::io::Write::write_all(&mut opts.open(path)?, bytes)
 }

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Join</title></head>
+<body>
+<h1>Join</h1>
+<form id="join"><label for="name">Your name</label> <input id="name"> <button>Join</button></form>
+<script>
+  document.getElementById('join').addEventListener('submit', (e) => {
+    e.preventDefault();
+    // A login that lives in a cookie and in localStorage.
+    document.cookie = 'member=1; path=/; max-age=3600';
+    localStorage.setItem('member_name', document.getElementById('name').value);
+    location.href = 'members.html';
+  });
+</script>
+</body></html>

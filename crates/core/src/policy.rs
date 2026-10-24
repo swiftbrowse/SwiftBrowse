@@ -31,6 +31,9 @@ pub struct Policy {
     /// Directories `upload_file` may read from. Empty: uploads are refused, so a
     /// page can never get an agent to hand over arbitrary local files.
     pub upload_roots: Vec<PathBuf>,
+    /// Where `save_storage_state` writes and `load_storage_state` reads (saved
+    /// logins). Defaults to `evidence_dir`.
+    pub state_dir: Option<PathBuf>,
     pub max_log_entries: usize,
 }
 
@@ -55,6 +58,7 @@ impl Default for Policy {
             screenshot_on_failure: true,
             allow_evaluate: false,
             upload_roots: Vec::new(),
+            state_dir: None,
             max_log_entries: 500,
         }
     }
@@ -122,6 +126,15 @@ impl Policy {
             ));
         }
         Ok(file)
+    }
+
+    /// The file for a saved storage state; names are validated like evidence names.
+    pub fn state_path(&self, name: &str) -> Result<PathBuf> {
+        let file = self.evidence_path(name, "json")?;
+        Ok(match &self.state_dir {
+            Some(dir) => dir.join(file.file_name().unwrap_or_default()),
+            None => file,
+        })
     }
 
     /// Validates a caller-supplied file name stem so writes stay inside `evidence_dir`.

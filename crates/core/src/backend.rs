@@ -70,6 +70,13 @@ pub trait Backend: Send {
         Err(CoreError::unsupported("script evaluation is not available on this backend"))
     }
 
+    /// Cookies and per-origin localStorage, in Playwright's storageState format.
+    async fn storage_state(&mut self) -> Result<Value> {
+        Err(CoreError::unsupported("storage state is not available on this backend"))
+    }
+    async fn set_storage_state(&mut self, _state: &Value) -> Result<()> {
+        Err(CoreError::unsupported("storage state is not available on this backend"))
+    }
     /// Adds a network route; returns its id.
     async fn add_route(&mut self, _route: RouteArgs) -> Result<String> {
         Err(CoreError::unsupported("network mocking is not available on this backend"))

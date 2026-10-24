@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Members</title></head>
+<body>
+<h1 id="h"></h1>
+<script>
+  const member = document.cookie.split('; ').includes('member=1');
+  const name = localStorage.getItem('member_name');
+  document.getElementById('h').textContent = member && name ? 'Members area for ' + name : 'Members only';
+</script>
+</body></html>

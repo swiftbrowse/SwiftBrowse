@@ -23,7 +23,9 @@ const MARKER: &str = ".swiftbrowse-test-results";
 
 #[derive(Args, Clone)]
 pub struct TestArgs {
-    /// Test files or directories to search for `*.test.json` and `*.spec.json` (default: current directory).
+    /// Test files or directories to search for `*.test.json` and `*.spec.json`, plus
+    /// `*.setup.json` files that run first (e.g. to log in and save the state).
+    /// Default: the current directory.
     paths: Vec<PathBuf>,
     /// Tests run at the same time, each in its own isolated session (default: half the CPU cores).
     #[arg(long, short = 'j')]
@@ -118,6 +120,9 @@ struct FileSpec {
     steps: Option<Vec<Value>>,
     #[serde(default)]
     stop_on_failure: Option<bool>,
+    /// Start every test from this saved state (see `save_storage_state`), e.g. logged in.
+    #[serde(default)]
+    storage_state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -156,6 +161,8 @@ struct TestCase {
     only: bool,
     retries: u32,
     timeout: Duration,
+    /// From a `*.setup.json` file: runs before every other test.
+    setup: bool,
 }
 
 struct LoadOptions<'a> {
@@ -169,7 +176,7 @@ struct LoadOptions<'a> {
 fn discover(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     fn is_test(p: &Path) -> bool {
         let n = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        n.ends_with(".test.json") || n.ends_with(".spec.json")
+        n.ends_with(".test.json") || n.ends_with(".spec.json") || n.ends_with(".setup.json")
     }
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
@@ -315,7 +322,11 @@ fn load(path: &Path, opts: &LoadOptions) -> Result<Vec<TestCase>, String> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let suite = spec.name.clone().unwrap_or_else(|| {
         let n = path.file_name().and_then(|n| n.to_str()).unwrap_or("tests");
-        n.trim_end_matches(".json").trim_end_matches(".test").trim_end_matches(".spec").to_string()
+        n.trim_end_matches(".json")
+            .trim_end_matches(".test")
+            .trim_end_matches(".spec")
+            .trim_end_matches(".setup")
+            .to_string()
     });
     let steps_of = |list: &[Value], what: &str| -> Result<Vec<Step>, String> {
         list.iter()
@@ -326,7 +337,12 @@ fn load(path: &Path, opts: &LoadOptions) -> Result<Vec<TestCase>, String> {
             })
             .collect()
     };
-    let before = Arc::new(steps_of(&spec.before_each, "before_each")?);
+    let mut before_each = spec.before_each.clone();
+    if let Some(name) = &spec.storage_state {
+        before_each.insert(0, json!({ "op": "load_storage_state", "name": name }));
+    }
+    let before = Arc::new(steps_of(&before_each, "before_each")?);
+    let setup = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".setup.json"));
     let after = Arc::new(steps_of(&spec.after_each, "after_each")?);
     let mut tests = spec.tests;
     if let Some(steps) = spec.steps {
@@ -369,6 +385,7 @@ fn load(path: &Path, opts: &LoadOptions) -> Result<Vec<TestCase>, String> {
             only: t.only,
             retries: t.retries.unwrap_or(opts.retries),
             timeout: Duration::from_millis(t.timeout_ms.unwrap_or(opts.test_timeout_ms)),
+            setup,
         });
     }
     Ok(out)
@@ -464,6 +481,8 @@ impl Runner {
         policy.screenshot_on_failure = false;
         policy.allow_evaluate = true;
         policy.upload_roots.extend(self.upload_roots.iter().cloned());
+        // Saved logins are shared by every test of the run.
+        policy.state_dir = Some(self.output_dir.join(".auth"));
         // Tests run against test environments: "Delete" and "Pay" are normal clicks.
         policy.require_approval_for_consequential = false;
         policy.default_timeout_ms = self.timeout_ms.unwrap_or(self.expect_timeout_ms);
@@ -828,6 +847,8 @@ pub async fn run(args: TestArgs) -> ExitCode {
             Err(e) => return config_error(format!("{}: {e}", f.display())),
         }
     }
+    // Filters pick among the tests; setup tests always run when anything else does.
+    let (setups, mut cases): (Vec<TestCase>, Vec<TestCase>) = cases.into_iter().partition(|c| c.setup);
     if cases.iter().any(|c| c.only) {
         if args.forbid_only {
             let titles: Vec<&str> = cases.iter().filter(|c| c.only).map(|c| c.title.as_str()).collect();
@@ -849,10 +870,20 @@ pub async fn run(args: TestArgs) -> ExitCode {
         };
         cases = cases.into_iter().enumerate().filter(|(k, _)| k % n == i - 1).map(|(_, c)| c).collect();
     }
+    if !cases.is_empty() {
+        let mut all = setups;
+        all.append(&mut cases);
+        cases = all;
+    }
     if args.repeat_each > 1 {
         let n = args.repeat_each;
         let mut repeated = Vec::with_capacity(cases.len() * n);
         for c in cases {
+            // Setup tests run once; repeating them would only redo the same login.
+            if c.setup {
+                repeated.push(c);
+                continue;
+            }
             for k in 1..n {
                 repeated.push(TestCase {
                     title: format!("{} (repeat {})", c.title, k + 1),
@@ -866,6 +897,7 @@ pub async fn run(args: TestArgs) -> ExitCode {
                     only: c.only,
                     retries: c.retries,
                     timeout: c.timeout,
+                    setup: c.setup,
                 });
             }
             repeated.insert(repeated.len() + 1 - n, c);
@@ -918,18 +950,43 @@ pub async fn run(args: TestArgs) -> ExitCode {
     }
     let started = Instant::now();
     let cases = Arc::new(cases);
-    let mut results: Vec<(usize, TestResult)> = stream::iter(0..cases.len())
-        .map(|i| {
-            let (runner, cases) = (runner.clone(), cases.clone());
-            async move {
-                let r = runner.run_test(i, &cases[i]).await;
-                print_progress(reporter, &r);
-                (i, r)
-            }
-        })
-        .buffer_unordered(workers)
-        .collect()
-        .await;
+    let batch = |indices: Vec<usize>| {
+        let (runner, cases) = (runner.clone(), cases.clone());
+        stream::iter(indices)
+            .map(move |i| {
+                let (runner, cases) = (runner.clone(), cases.clone());
+                async move {
+                    let r = runner.run_test(i, &cases[i]).await;
+                    print_progress(reporter, &r);
+                    (i, r)
+                }
+            })
+            .buffer_unordered(workers)
+            .collect::<Vec<_>>()
+    };
+    // Setup tests (`*.setup.json`) first; if one fails, the rest cannot trust their state.
+    let (setup, rest): (Vec<usize>, Vec<usize>) = (0..cases.len()).partition(|i| cases[*i].setup);
+    let mut results = batch(setup).await;
+    let setup_failed = results.iter().any(|(_, r)| r.status == Status::Failed);
+    if setup_failed {
+        for i in rest {
+            let c = &cases[i];
+            let r = TestResult {
+                file: c.file.clone(),
+                suite: c.suite.clone(),
+                name: c.name.clone(),
+                title: c.title.clone(),
+                status: Status::Skipped,
+                duration_ms: 0,
+                skip_reason: Some("not run: a setup test failed".into()),
+                attempts: Vec::new(),
+            };
+            print_progress(reporter, &r);
+            results.push((i, r));
+        }
+    } else {
+        results.extend(batch(rest).await);
+    }
     results.sort_by_key(|(i, _)| *i);
     let results: Vec<TestResult> = results.into_iter().map(|(_, r)| r).collect();
     let wall_ms = started.elapsed().as_millis() as u64;
