@@ -48,15 +48,22 @@ pub fn save(frames: &[Frame], end: f64, dir: &Path, stem: &str) -> Result<Record
     };
     let codec = webm_encoder(&ffmpeg)?;
     let path = dir.join(format!("{stem}.webm"));
-    let (w, h) = jpeg_size(&frames[0].jpeg).unwrap_or((800, 500));
-    // Even dimensions for the encoder; gray padding like Playwright's.
+    // Frames can differ in size (streamed frames vs captures of the page): size
+    // the video to the largest and fit every frame into it, keeping its aspect
+    // ratio, with gray padding like Playwright's. Even dimensions for the encoder.
+    let (w, h) =
+        frames.iter().filter_map(|f| jpeg_size(&f.jpeg)).fold((0, 0), |(mw, mh), (fw, fh)| (mw.max(fw), mh.max(fh)));
+    let (w, h) = if w == 0 || h == 0 { (800, 500) } else { (w, h) };
     let (w, h) = (w + w % 2, h + h % 2);
     let mut child = Command::new(&ffmpeg)
         .args(["-loglevel", "error", "-f", "image2pipe", "-avioflags", "direct", "-fpsprobesize", "0"])
         .args(["-probesize", "32", "-analyzeduration", "0", "-c:v", "mjpeg", "-i", "pipe:0", "-y", "-an"])
         .args(["-r", &FPS.to_string(), "-c:v", codec, "-qmin", "0", "-qmax", "50", "-crf", "8"])
         .args(["-deadline", "realtime", "-speed", "8", "-b:v", "1M", "-threads", "1"])
-        .args(["-vf", &format!("pad={w}:{h}:0:0:gray,crop={w}:{h}:0:0")])
+        .args([
+            "-vf",
+            &format!("scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:gray"),
+        ])
         .arg(&path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -131,4 +138,41 @@ fn jpeg_size(b: &[u8]) -> Option<(u32, u32)> {
         i += 2 + len;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tiny baseline JPEG of the given size, made by ffmpeg.
+    fn jpeg(ffmpeg: &Path, w: u32, h: u32) -> Vec<u8> {
+        let out = Command::new(ffmpeg)
+            .args(["-loglevel", "error", "-f", "lavfi", "-i", &format!("color=c=blue:s={w}x{h}"), "-frames:v", "1"])
+            .args(["-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"])
+            .output()
+            .unwrap();
+        out.stdout
+    }
+
+    #[test]
+    fn frames_of_different_sizes_encode() {
+        let Some(ffmpeg) = crate::launch::discover_ffmpeg() else { return };
+        // Some ffmpeg builds (Playwright's) have no lavfi input to make test frames.
+        let small = jpeg(&ffmpeg, 640, 400);
+        if small.is_empty() {
+            return;
+        }
+        let frames = vec![
+            Frame { timestamp: 0.0, jpeg: small },
+            Frame { timestamp: 0.2, jpeg: jpeg(&ffmpeg, 1280, 800) },
+            // Larger than the first frame: what broke the old padding filter.
+            Frame { timestamp: 0.4, jpeg: jpeg(&ffmpeg, 1300, 820) },
+        ];
+        assert_eq!(jpeg_size(&frames[2].jpeg), Some((1300, 820)));
+        let dir = tempfile::tempdir().unwrap();
+        match save(&frames, 0.6, dir.path(), "mixed").unwrap() {
+            Recording::Video(p) => assert!(std::fs::metadata(p).unwrap().len() > 0),
+            Recording::Frames { .. } => panic!("expected a video"),
+        }
+    }
 }
