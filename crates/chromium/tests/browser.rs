@@ -377,3 +377,20 @@ async fn click_effects_are_reported() {
     let e = effect(&r);
     assert!(e == json!(["navigated"]) || e.as_array().unwrap().contains(&json!("url_changed")), "{e:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn video_has_frames_on_every_platform() {
+    let Some(mut h) = harness().await else { return };
+    h.ok("start_video", json!({})).await;
+    // A page that repaints on a timer, then a still stretch: frames must cover both.
+    let page = "data:text/html,<h1 id=t>0</h1><script>let n=0;const i=setInterval(()=>{t.textContent=++n;if(n>5)clearInterval(i)},80)</script>";
+    h.ok("navigate", json!({ "url": page })).await;
+    h.ok("wait_for", json!({ "condition": { "type": "text_visible", "text": "6" } })).await;
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    let r = h.ok("stop_video", json!({ "name": "frames" })).await;
+    let d = r.data.unwrap();
+    // Printed so CI shows how each platform's screencast behaves.
+    eprintln!("video: {} frames ({} streamed, {} filled)", d["frames"], d["streamed"], d["filled"]);
+    assert!(d["frames"].as_u64().unwrap() >= 4, "{d}");
+    assert!(std::path::Path::new(d["path"].as_str().unwrap()).exists(), "{d}");
+}

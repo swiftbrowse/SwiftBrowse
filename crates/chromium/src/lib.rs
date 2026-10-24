@@ -167,6 +167,13 @@ struct Shared {
     mocked: Mutex<HashSet<String>>,
     /// Screencast frames while a video is being recorded.
     screencast: Mutex<Option<VecDeque<video::Frame>>>,
+    /// The session being recorded (the active tab), for filler captures.
+    video_session: Mutex<String>,
+    /// When the last frame arrived, from the screencast or a filler capture.
+    last_frame: Mutex<Option<Instant>>,
+    /// Frames the browser streamed, and frames captured to fill gaps.
+    streamed: std::sync::atomic::AtomicUsize,
+    filled: std::sync::atomic::AtomicUsize,
 }
 
 struct Mock {
@@ -605,6 +612,7 @@ impl ChromiumBackend {
         let previous = std::mem::replace(&mut self.tab, tab);
         // A recording follows the active tab.
         if self.shared.screencast.lock().unwrap().is_some() {
+            *self.shared.video_session.lock().unwrap() = self.tab.session.clone();
             let _ = self.cdp.send("Page.stopScreencast", json!({}), Some(&previous.session), CMD_TIMEOUT).await;
             let _ = self.send("Page.startScreencast", self.screencast_params()).await;
         }
@@ -1067,6 +1075,8 @@ async fn pump_events(
             "Fetch.requestPaused" => answer_paused(p, &cdp, &session, &shared),
             "Page.screencastFrame" => {
                 if let Some(frames) = shared.screencast.lock().unwrap().as_mut() {
+                    *shared.last_frame.lock().unwrap() = Some(Instant::now());
+                    shared.streamed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(s(p, "data")) {
                         if frames.len() >= video::MAX_FRAMES {
                             frames.pop_front();
@@ -1529,8 +1539,49 @@ impl Backend for ChromiumBackend {
     }
 
     async fn start_video(&mut self) -> Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
         *self.shared.screencast.lock().unwrap() = Some(VecDeque::new());
-        self.send("Page.startScreencast", self.screencast_params()).await.map(|_| ())
+        *self.shared.video_session.lock().unwrap() = self.tab.session.clone();
+        *self.shared.last_frame.lock().unwrap() = None;
+        self.shared.streamed.store(0, Relaxed);
+        self.shared.filled.store(0, Relaxed);
+        self.send("Page.startScreencast", self.screencast_params()).await?;
+        // The screencast only sends a frame when the page repaints, and some
+        // platforms (seen on macOS) send none at all. Whenever it has been quiet
+        // for a while, capture the page instead, which also forces a repaint.
+        let (cdp, shared) = (self.cdp.clone(), self.shared.clone());
+        tokio::spawn(async move {
+            const QUIET: Duration = Duration::from_millis(250);
+            loop {
+                tokio::time::sleep(QUIET).await;
+                if shared.screencast.lock().unwrap().is_none() {
+                    break;
+                }
+                if shared.last_frame.lock().unwrap().is_some_and(|t| t.elapsed() < QUIET) {
+                    continue;
+                }
+                let session = shared.video_session.lock().unwrap().clone();
+                let params = json!({ "format": "jpeg", "quality": 70 });
+                let Ok(r) = cdp.send("Page.captureScreenshot", params, Some(&session), Duration::from_secs(5)).await
+                else {
+                    continue;
+                };
+                let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(s(&r, "data")) else { continue };
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                if let Some(frames) = shared.screencast.lock().unwrap().as_mut() {
+                    if frames.len() >= video::MAX_FRAMES {
+                        frames.pop_front();
+                    }
+                    frames.push_back(video::Frame { timestamp, jpeg });
+                    *shared.last_frame.lock().unwrap() = Some(Instant::now());
+                    shared.filled.fetch_add(1, Relaxed);
+                }
+            }
+        });
+        Ok(())
     }
 
     async fn stop_video(&mut self, dir: &Path, stem: &str) -> Result<Value> {
@@ -1544,7 +1595,6 @@ impl Backend for ChromiumBackend {
             .and_then(|r| base64::engine::general_purpose::STANDARD.decode(s(&r, "data")).ok());
         let now =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-        let streamed = self.shared.screencast.lock().unwrap().as_ref().map_or(0, VecDeque::len);
         if let (Some(jpeg), Some(frames)) = (last, self.shared.screencast.lock().unwrap().as_mut()) {
             frames.push_back(video::Frame { timestamp: now, jpeg });
         }
@@ -1563,9 +1613,15 @@ impl Backend for ChromiumBackend {
         let saved = tokio::task::spawn_blocking(move || video::save(&frames, end, &dir, &stem))
             .await
             .map_err(|e| CoreError::backend(format!("video encoding failed: {e}")))??;
-        let note = (streamed == 0).then_some("the browser streamed no frames; the video shows the final page only");
+        let streamed = self.shared.streamed.load(std::sync::atomic::Ordering::Relaxed);
+        let filled = self.shared.filled.load(std::sync::atomic::Ordering::Relaxed);
+        let note = (streamed == 0).then(|| {
+            format!("the browser streamed no frames; the video is made of {} captures of the page", filled + 1)
+        });
         Ok(match saved {
-            video::Recording::Video(path) => json!({ "path": path, "format": "webm", "frames": count, "note": note }),
+            video::Recording::Video(path) => json!({
+                "path": path, "format": "webm", "frames": count, "streamed": streamed, "filled": filled, "note": note,
+            }),
             video::Recording::Frames { dir, count } => json!({
                 "path": dir, "format": "jpeg-frames", "frames": count,
                 "note": "no ffmpeg found (npx playwright install ffmpeg, or set SWIFTBROWSE_FFMPEG): kept the frames instead",

@@ -36,6 +36,8 @@ jobs:
       - run: npx -y playwright@1.64.0 install --with-deps chromium chromium-headless-shell ffmpeg
       - run: cargo run -q -p swiftbrowse-cli -- doctor
       - run: cargo test --workspace
+      # Shows how this platform's screencast behaves (streamed vs filled-in frames).
+      - run: cargo test -p swiftbrowse-chromium --test browser video -- --nocapture
       # The SDKs are generated from the engine's schemas: they must match it.
       - run: |
           node sdk/typescript/scripts/generate.mjs target/debug/swiftbrowse
@@ -63,6 +65,8 @@ jobs:
       - run: npx -y playwright@1.64.0 install chromium chromium-headless-shell ffmpeg
       - run: cargo run -q -p swiftbrowse-cli -- doctor
       - run: cargo test --workspace
+      # Shows how this platform's screencast behaves (streamed vs filled-in frames).
+      - run: cargo test -p swiftbrowse-chromium --test browser video -- --nocapture
 
   bench:
     if: github.event_name == 'workflow_dispatch' && inputs.bench
