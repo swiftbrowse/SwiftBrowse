@@ -1538,6 +1538,10 @@ impl Backend for ChromiumBackend {
         Ok(r["result"].get("value").cloned().unwrap_or(Value::Null))
     }
 
+    async fn dom_snapshot(&mut self, mark: Option<&str>) -> Result<Value> {
+        self.call("domSnapshot", json!([mark])).await
+    }
+
     async fn start_video(&mut self) -> Result<()> {
         use std::sync::atomic::Ordering::Relaxed;
         *self.shared.screencast.lock().unwrap() = Some(VecDeque::new());

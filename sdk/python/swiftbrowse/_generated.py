@@ -87,6 +87,11 @@ class Operations:
         the session policy allows scripts (the test runner does; MCP needs --allow-evaluate)."""
         return self.run('evaluate', _args(locals(), ['expression', 'timeout_ms']))
 
+    def get_dom_snapshot(self, *, mark: Optional[str] = None) -> dict:
+        """A self-contained, script-free HTML copy of the page (form state, shadow roots, live CSS)
+        for trace viewers. Large; prefer get_page_snapshot to read a page."""
+        return self.run('get_dom_snapshot', _args(locals(), ['mark']))
+
     def start_video(self) -> dict:
         """Start recording a video of the active tab (follows tab switches)."""
         return self.run('start_video', _args(locals(), []))

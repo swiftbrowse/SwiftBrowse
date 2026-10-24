@@ -21,6 +21,7 @@ export const OPS = [
   ["go_forward","goForward",[]],
   ["reload","reload",[]],
   ["evaluate","evaluate",["expression"]],
+  ["get_dom_snapshot","getDomSnapshot",[]],
   ["start_video","startVideo",[]],
   ["stop_video","stopVideo",[]],
   ["save_storage_state","saveStorageState",["name"]],

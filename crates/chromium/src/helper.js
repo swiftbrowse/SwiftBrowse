@@ -571,6 +571,99 @@
     };
   }
 
+  // A self-contained, script-free copy of the page for trace viewers: current
+  // form state, open shadow roots, CSS from the CSSOM (including styles added by
+  // scripts), canvases as images. `markRef` marks the element an action used.
+  const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+  const MAX_SNAPSHOT = 3 * 1024 * 1024;
+  function domSnapshot(markRef) {
+    const marked = markRef ? (() => { try { return get(markRef); } catch (_) { return null; } })() : null;
+    const escText = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const escAttr = (t) => String(t).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    const sheetText = (sheet) => { try { return Array.from(sheet.cssRules, (r) => r.cssText).join('\n'); } catch (_) { return null; } };
+    const out = [];
+    let size = 0;
+    const push = (s) => { size += s.length; if (size <= MAX_SNAPSHOT) out.push(s); };
+    function attrs(el, extra) {
+      let a = '';
+      for (const at of el.attributes) {
+        if (/^on/i.test(at.name)) continue;
+        if (extra && at.name in extra) continue;
+        a += ` ${at.name}="${escAttr(at.value)}"`;
+      }
+      for (const [k, v] of Object.entries(extra || {})) {
+        if (v === true) a += ` ${k}`;
+        else if (v !== false && v != null) a += ` ${k}="${escAttr(v)}"`;
+      }
+      return a;
+    }
+    function walk(node) {
+      if (node.nodeType === 3) { push(escText(node.data)); return; }
+      if (node.nodeType !== 1) return;
+      const el = node;
+      const tag = el.localName;
+      if (tag === 'script' || tag === 'noscript' || (tag === 'meta' && /refresh|content-security/i.test(el.httpEquiv || ''))) return;
+      if (tag === 'base') return;
+      const extra = {};
+      if (el === marked) extra['data-sb-target'] = '';
+      if (tag === 'input') {
+        const t = (el.type || '').toLowerCase();
+        if (t === 'checkbox' || t === 'radio') extra.checked = el.checked;
+        else if (t !== 'password' && t !== 'file') extra.value = el.value;
+      }
+      if (tag === 'option') extra.selected = el.selected;
+      if (tag === 'img' && el.currentSrc) extra.src = el.currentSrc;
+      if (tag === 'style') {
+        const css = el.sheet ? sheetText(el.sheet) : null;
+        push(`<style${attrs(el)}>${css ?? escText(el.textContent)}</style>`);
+        return;
+      }
+      if (tag === 'link' && /stylesheet/i.test(el.rel) && el.sheet) {
+        const css = sheetText(el.sheet);
+        if (css !== null) { push(`<style data-sb-from="${escAttr(el.href)}">${css}</style>`); return; }
+        extra.href = el.href;
+      }
+      if (tag === 'canvas') {
+        try {
+          const r = el.getBoundingClientRect();
+          push(`<img${attrs(el, { src: el.toDataURL(), width: Math.round(r.width), height: Math.round(r.height) })}>`);
+          return;
+        } catch (_) { /* tainted canvas: keep the element */ }
+      }
+      if (tag === 'iframe' || tag === 'frame') {
+        const r = el.getBoundingClientRect();
+        push(`<div data-sb-frame${el === marked ? ' data-sb-target' : ''} style="box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:${Math.round(r.width)}px;height:${Math.round(r.height)}px;border:1px dashed #999;font:12px sans-serif;color:#666">iframe: ${escText(el.src || el.name || '')}</div>`);
+        return;
+      }
+      push(`<${tag}${attrs(el, extra)}>`);
+      if (VOID.has(tag)) return;
+      if (el.shadowRoot) {
+        push('<template shadowrootmode="open">');
+        for (const c of el.shadowRoot.childNodes) walk(c);
+        push('</template>');
+      }
+      if (tag === 'textarea') { push(escText(el.value)); push('</textarea>'); return; }
+      const kids = tag === 'template' ? el.content.childNodes : el.childNodes;
+      for (const c of kids) walk(c);
+      push(`</${tag}>`);
+    }
+    push('<!doctype html>');
+    const root = document.documentElement;
+    push(`<html${attrs(root)}>`);
+    push(`<head><meta charset="utf-8"><base href="${escAttr(location.href)}">`);
+    if (document.head) for (const c of document.head.childNodes) walk(c);
+    push('</head>');
+    for (const c of root.childNodes) if (c !== document.head) walk(c);
+    push('</html>');
+    return {
+      html: size <= MAX_SNAPSHOT ? out.join('') : null,
+      truncated: size > MAX_SNAPSHOT,
+      url: location.href,
+      scroll: [Math.round(scrollX), Math.round(scrollY)],
+      viewport: [innerWidth, innerHeight],
+    };
+  }
+
   function safeMatches(el, sel) { try { return el.matches(sel); } catch (_) { return false; } }
 
   globalThis.__sb = {
@@ -582,6 +675,7 @@
     pointAt,
     readText: (r) => textOf(get(r)),
     element: (r) => get(r),
+    domSnapshot,
     fileNames: (r) => Array.from(get(r).files || [], (f) => f.name),
     // Identifies the current document: timeOrigin changes with every new document.
     docState: () => ({ origin: performance.timeOrigin, url: location.href, ready: document.readyState }),

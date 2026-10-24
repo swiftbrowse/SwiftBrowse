@@ -71,6 +71,10 @@ pub trait Backend: Send {
         Err(CoreError::unsupported("script evaluation is not available on this backend"))
     }
 
+    /// A self-contained HTML copy of the current document; see `get_dom_snapshot`.
+    async fn dom_snapshot(&mut self, _mark: Option<&str>) -> Result<Value> {
+        Err(CoreError::unsupported("DOM snapshots are not available on this backend"))
+    }
     /// Starts recording the active tab (it follows tab switches).
     async fn start_video(&mut self) -> Result<()> {
         Err(CoreError::unsupported("video is not available on this backend"))

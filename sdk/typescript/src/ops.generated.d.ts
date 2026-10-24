@@ -223,6 +223,11 @@ export type EvaluateArgs = {
   expression: string;
   timeout_ms?: number;
 };
+/** A self-contained, script-free HTML copy of the page (form state, shadow roots, live CSS) for trace viewers. Large; prefer get_page_snapshot to read a page. */
+export type GetDomSnapshotArgs = {
+  /** Mark this element (a ref) with `data-sb-target` in the snapshot. */
+  mark?: string;
+};
 /** Start recording a video of the active tab (follows tab switches). */
 export type StartVideoArgs = Record<string, never>;
 /** Stop recording and save the video (WebM via ffmpeg) to the evidence directory. */
@@ -377,6 +382,8 @@ export interface Operations {
   reload(options?: Omit<ReloadArgs, never>): Promise<ActionResult>;
   /** Run a JavaScript expression in the page and return its JSON result. Only available when the session policy allows scripts (the test runner does; MCP needs --allow-evaluate). */
   evaluate(expression: EvaluateArgs["expression"], options?: Omit<EvaluateArgs, "expression">): Promise<ActionResult>;
+  /** A self-contained, script-free HTML copy of the page (form state, shadow roots, live CSS) for trace viewers. Large; prefer get_page_snapshot to read a page. */
+  getDomSnapshot(options?: Omit<GetDomSnapshotArgs, never>): Promise<ActionResult>;
   /** Start recording a video of the active tab (follows tab switches). */
   startVideo(): Promise<ActionResult>;
   /** Stop recording and save the video (WebM via ffmpeg) to the evidence directory. */

@@ -528,6 +528,7 @@ impl Session {
                 }
                 Ok(Some(json!({ "files": selected })))
             }
+            Request::GetDomSnapshot(a) => Ok(Some(self.backend.dom_snapshot(a.mark.as_deref()).await?)),
             Request::StartVideo(_) => {
                 self.backend.start_video().await?;
                 Ok(None)

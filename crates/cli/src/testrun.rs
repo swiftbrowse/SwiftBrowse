@@ -428,6 +428,9 @@ struct StepRecord {
     /// Trace: the page as text after the step.
     #[serde(skip)]
     page: Option<String>,
+    /// Trace: DOM snapshot after the step (html, scroll, viewport).
+    #[serde(skip)]
+    dom: Option<Value>,
     #[serde(skip)]
     url: Option<String>,
 }
@@ -706,8 +709,11 @@ async fn run_step(
     trace: bool,
 ) -> bool {
     let r = mgr.execute(id, step.request.clone()).await;
-    let (mut screenshot, mut page, mut url) = (None, None, None);
+    let (mut screenshot, mut page, mut url, mut dom) = (None, None, None, None);
     if trace {
+        let mark = r.target.as_ref().map(|t| t.element.ref_id.clone());
+        let snap = mgr.execute(id, Request::GetDomSnapshot(swiftbrowse_core::request::DomSnapshotArgs { mark })).await;
+        dom = snap.data;
         let name = format!("step-{:03}", records.len() + 1);
         let shot = mgr
             .execute(id, Request::from_op("get_screenshot", json!({ "name": name, "format": "jpeg" })).expect("valid"))
@@ -744,6 +750,7 @@ async fn run_step(
         screenshot,
         page,
         url,
+        dom,
     });
     r.ok
 }
@@ -768,6 +775,7 @@ fn trace_html(title: &str, a: &Attempt, requests: &[Value]) -> String {
             "error": s.error.clone().unwrap_or_default(),
             "checks": s.checks.clone().unwrap_or(Value::Null),
             "value": s.value.clone().unwrap_or(Value::Null),
+            "dom": s.dom.clone().unwrap_or(Value::Null),
         });
         steps.push_str(&format!(
             "<li class=\"{}\" data-i=\"{i}\" tabindex=\"0\"><span class=mark>{}</span><span class=phase>{}</span><code>{}</code><span class=ms>{} ms</span><script type=\"application/json\">{}</script></li>",
@@ -813,12 +821,21 @@ li.sel {{ background:var(--sel); }} li.ok .mark {{ color:var(--pass); }} li.bad 
 code, pre {{ font:12px ui-monospace,monospace; overflow-wrap:anywhere; }}
 pre {{ background:var(--card); border:1px solid var(--line); padding:8px; white-space:pre-wrap; max-height:40vh; overflow:auto; }}
 img {{ max-width:100%; border:1px solid var(--line); }}
+.tabs {{ display:flex; gap:4px; margin:0 0 8px; }} .tabs button {{ font:inherit; padding:4px 10px; border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:4px; cursor:pointer; }}
+.tabs button[aria-selected=true] {{ background:var(--sel); }}
+#stage {{ position:relative; overflow:hidden; border:1px solid var(--line); background:#fff; }} #dom {{ border:0; transform-origin:0 0; position:absolute; top:0; left:0; }}
 table {{ border-collapse:collapse; width:100%; font-size:12px; }} td {{ border-bottom:1px solid var(--line); padding:2px 6px; vertical-align:top; }} td.url {{ overflow-wrap:anywhere; }}
 </style></head><body>
 <h1>{title}</h1>
 <p class="meta">{status} · {ms} ms · {n} steps{error}</p>
 <div class="wrap"><ol id="steps">{steps}</ol>
-<div><p class="meta" id="url"></p><img id="shot" alt="Page after the selected step"><p class="err" id="err"></p><pre id="checks" hidden></pre><h2>Page as text</h2><pre id="page"></pre></div></div>
+<div><p class="meta" id="url"></p>
+<div class="tabs" role="tablist"><button role="tab" id="t-shot" aria-selected="true">Screenshot</button><button role="tab" id="t-dom" aria-selected="false">Live DOM</button><button role="tab" id="t-text" aria-selected="false">Text</button></div>
+<div id="v-shot"><img id="shot" alt="Page after the selected step"></div>
+<div id="v-dom" hidden><div id="stage"><iframe id="dom" sandbox="allow-same-origin" title="DOM snapshot after the selected step"></iframe></div>
+<p class="meta" id="pick">Hover the page to inspect elements; click to pin one. Right-click → Inspect opens it in your browser's devtools.</p><pre id="picked" hidden></pre></div>
+<div id="v-text" hidden><pre id="page"></pre></div>
+<p class="err" id="err"></p><pre id="checks" hidden></pre></div></div>
 {video}
 <h2>Requests</h2><table>{reqs}</table>
 <script>
@@ -833,6 +850,65 @@ function show(li) {{
   const extra = d.checks || d.value;
   checks.hidden = extra === null; checks.textContent = extra === null ? '' : JSON.stringify(extra, null, 2);
   document.getElementById('page').textContent = d.page;
+  current = d;
+  if (view === 'dom') renderDom();
+}}
+let current = null, view = 'shot', pinned = null;
+function setView(v) {{
+  view = v;
+  for (const k of ['shot', 'dom', 'text']) {{
+    document.getElementById('v-' + k).hidden = k !== v;
+    document.getElementById('t-' + k).setAttribute('aria-selected', String(k === v));
+  }}
+  if (v === 'dom') renderDom();
+}}
+['shot', 'dom', 'text'].forEach((k) => document.getElementById('t-' + k).addEventListener('click', () => setView(k)));
+// The snapshot is rendered at the page's own viewport size, scaled to fit, with scripts off.
+function renderDom() {{
+  const frame = document.getElementById('dom'), stage = document.getElementById('stage');
+  const dom = current && current.dom;
+  if (!dom || !dom.html) {{ frame.srcdoc = '<p style="font:14px sans-serif">' + (dom && dom.truncated ? 'Page too large to snapshot.' : 'No DOM snapshot for this step.') + '</p>'; return; }}
+  const [w, h] = dom.viewport || [1280, 800];
+  const scale = Math.min(1, stage.clientWidth / w);
+  frame.style.width = w + 'px'; frame.style.height = h + 'px'; frame.style.transform = 'scale(' + scale + ')';
+  stage.style.height = Math.round(h * scale) + 'px';
+  frame.onload = () => inspect(frame.contentDocument, dom);
+  frame.srcdoc = dom.html;
+}}
+new ResizeObserver(() => {{ if (view === 'dom') renderDom(); }}).observe(document.getElementById('stage'));
+// Hover outlines an element; click pins it and shows how SwiftBrowse would target it.
+function inspect(doc, dom) {{
+  if (!doc) return;
+  const st = doc.createElement('style');
+  st.textContent = '[data-sb-target]{{outline:3px solid #cf222e!important;outline-offset:2px}} [data-sb-hover]{{outline:2px solid #0969da!important;cursor:crosshair}}';
+  doc.head.append(st);
+  doc.defaultView.scrollTo(dom.scroll[0], dom.scroll[1]);
+  const t = doc.querySelector('[data-sb-target]');
+  if (t) t.scrollIntoView({{ block: 'center' }});
+  let hover = null;
+  doc.addEventListener('mouseover', (e) => {{ hover?.removeAttribute('data-sb-hover'); hover = e.target; hover.setAttribute('data-sb-hover', ''); if (!pinned) describe(hover); }});
+  doc.addEventListener('click', (e) => {{ e.preventDefault(); pinned = pinned === e.target ? null : e.target; describe(e.target); }}, true);
+}}
+function suggest(el) {{
+  const text = (el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  const tid = el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('data-test');
+  if (tid) return {{ by: 'test_id', id: tid }};
+  const tag = el.localName, type = (el.getAttribute('type') || '').toLowerCase();
+  const role = el.getAttribute('role') || (tag === 'button' || type === 'submit' || type === 'button' ? 'button' : tag === 'a' && el.hasAttribute('href') ? 'link' : type === 'checkbox' ? 'checkbox' : type === 'radio' ? 'radio' : tag === 'select' ? 'combobox' : /^h[1-6]$/.test(tag) ? 'heading' : null);
+  if (['input', 'textarea', 'select'].includes(tag) && el.id) {{
+    const label = el.ownerDocument.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+    if (label) return {{ by: 'label', text: label.textContent.trim() }};
+  }}
+  if (role && text) return {{ by: 'role', role, name: text }};
+  if (el.id) return {{ by: 'css', selector: '#' + CSS.escape(el.id) }};
+  return text ? {{ by: 'text', text }} : {{ by: 'css', selector: tag }};
+}}
+function describe(el) {{
+  const p = document.getElementById('picked');
+  const cls = el.classList.length ? '.' + [...el.classList].join('.') : '';
+  p.hidden = false;
+  p.textContent = (pinned ? 'Pinned: ' : '') + el.localName + (el.id ? '#' + el.id : '') + cls +
+    '\ntarget: ' + JSON.stringify(suggest(el)) + '\n\n' + el.outerHTML.slice(0, 600);
 }}
 items.forEach((li) => {{ li.addEventListener('click', () => show(li)); li.addEventListener('keydown', (e) => {{ if (e.key === 'Enter') show(li); }}); }});
 if (items.length) show(items.find((x) => x.classList.contains('bad')) || items[items.length - 1]);

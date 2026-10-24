@@ -339,6 +339,14 @@ pub fn glob_to_regex(glob: &str) -> String {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct DomSnapshotArgs {
+    /// Mark this element (a ref) with `data-sb-target` in the snapshot.
+    #[serde(default)]
+    pub mark: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StopVideoArgs {
     /// File name stem in the evidence directory (default `video`).
     #[serde(default)]
@@ -490,6 +498,7 @@ pub enum Request {
     GoForward(HistoryArgs),
     Reload(HistoryArgs),
     Evaluate(EvaluateArgs),
+    GetDomSnapshot(DomSnapshotArgs),
     StartVideo(NoArgs),
     StopVideo(StopVideoArgs),
     SaveStorageState(StorageStateArgs),
@@ -532,6 +541,7 @@ impl Request {
             Request::GoForward(_) => "go_forward",
             Request::Reload(_) => "reload",
             Request::Evaluate(_) => "evaluate",
+            Request::GetDomSnapshot(_) => "get_dom_snapshot",
             Request::StartVideo(_) => "start_video",
             Request::StopVideo(_) => "stop_video",
             Request::SaveStorageState(_) => "save_storage_state",
@@ -599,6 +609,7 @@ pub fn op_specs() -> Vec<OpSpec> {
         OpSpec { name: "go_forward", description: "Go forward one history entry and wait for the page to load.", schema: schema_of::<HistoryArgs> },
         OpSpec { name: "reload", description: "Reload the page and wait for it to load.", schema: schema_of::<HistoryArgs> },
         OpSpec { name: "evaluate", description: "Run a JavaScript expression in the page and return its JSON result. Only available when the session policy allows scripts (the test runner does; MCP needs --allow-evaluate).", schema: schema_of::<EvaluateArgs> },
+        OpSpec { name: "get_dom_snapshot", description: "A self-contained, script-free HTML copy of the page (form state, shadow roots, live CSS) for trace viewers. Large; prefer get_page_snapshot to read a page.", schema: schema_of::<DomSnapshotArgs> },
         OpSpec { name: "start_video", description: "Start recording a video of the active tab (follows tab switches).", schema: schema_of::<NoArgs> },
         OpSpec { name: "stop_video", description: "Stop recording and save the video (WebM via ffmpeg) to the evidence directory.", schema: schema_of::<StopVideoArgs> },
         OpSpec { name: "save_storage_state", description: "Save this session's cookies and the localStorage of its open origins (a logged-in state) under a name, in Playwright's storageState format.", schema: schema_of::<StorageStateArgs> },
