@@ -140,6 +140,8 @@ struct State {
     worlds_created: u64,
     /// Loader id of the newest main-frame document (lifecycle `init`).
     last_init_loader: String,
+    /// Main-frame documents in the order they started (loader ids, recent ones).
+    inits: VecDeque<String>,
     /// Loader id of the document the current isolated world belongs to.
     world_loader: String,
     helper_in: Option<i64>,
@@ -609,9 +611,10 @@ impl ChromiumBackend {
         if !error.is_empty() {
             return Err(CoreError::new(ErrorKind::NavigationFailed, format!("{url}: {error}")));
         }
-        let loader = s(&r, "loaderId");
+        let mut loader = s(&r, "loaderId");
         if !loader.is_empty() {
-            self.wait_lifecycle(&loader, "DOMContentLoaded", Duration::from_secs(10)).await?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            self.wait_lifecycle(&mut loader, "DOMContentLoaded", deadline, 10_000).await?;
         }
         Ok(())
     }
@@ -663,44 +666,71 @@ impl ChromiumBackend {
     /// `Ok(None)` means the fast path could not be used and the caller should fall back.
     /// `loader` is the navigation's loader id: only the isolated world created for
     /// that document is used.
-    async fn load_in_page(&mut self, loader: &str, deadline: tokio::time::Instant) -> Result<Option<Loaded>> {
+    /// The newest main-frame document that started after `loader`, if any: the
+    /// page replaced itself while loading (a client-side redirect).
+    fn newer_document(&self, loader: &str) -> Option<String> {
+        let st = self.tab.state.lock().unwrap();
+        let i = st.inits.iter().position(|l| l == loader)?;
+        st.inits.iter().skip(i + 1).last().cloned()
+    }
+
+    async fn load_in_page(&mut self, loader: &mut String, deadline: tokio::time::Instant) -> Result<Option<Loaded>> {
         loop {
-            self.tab.lifecycle.borrow_and_update();
-            {
-                let st = self.tab.state.lock().unwrap();
-                if st.world.is_some() && st.world_loader == loader {
-                    break;
+            loop {
+                self.tab.lifecycle.borrow_and_update();
+                if let Some(newer) = self.newer_document(loader) {
+                    trace_event("client-side redirect: following the new document");
+                    *loader = newer;
                 }
-            }
-            match tokio::time::timeout_at(deadline, self.tab.lifecycle.changed()).await {
-                Ok(Ok(())) => continue,
-                Ok(Err(_)) => return Err(CoreError::backend("browser connection closed")),
-                Err(_) => return Ok(None),
-            }
-        }
-        let render_ms =
-            RENDER_WAIT.min(deadline.saturating_duration_since(tokio::time::Instant::now())).as_millis() as u64;
-        match tokio::time::timeout_at(deadline, self.call("loaded", json!([render_ms]))).await {
-            Ok(Ok(v)) => {
-                if std::env::var_os("SWIFTBROWSE_TRACE").is_some() {
+                {
                     let st = self.tab.state.lock().unwrap();
-                    eprintln!(
-                        "[swiftbrowse] in-page load result: {v}; in flight: {:?}",
-                        st.inflight.values().collect::<Vec<_>>()
-                    );
+                    if st.world.is_some() && st.world_loader == *loader {
+                        break;
+                    }
                 }
-                Ok(serde_json::from_value(v).ok())
+                match tokio::time::timeout_at(deadline, self.tab.lifecycle.changed()).await {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(_)) => return Err(CoreError::backend("browser connection closed")),
+                    Err(_) => return Ok(None),
+                }
             }
-            // Context replaced mid-load (redirect, reload) or slow page: use the lifecycle path.
-            Ok(Err(_)) | Err(_) => Ok(None),
+            let render_ms =
+                RENDER_WAIT.min(deadline.saturating_duration_since(tokio::time::Instant::now())).as_millis() as u64;
+            match tokio::time::timeout_at(deadline, self.call("loaded", json!([render_ms]))).await {
+                Ok(Ok(v)) => {
+                    if std::env::var_os("SWIFTBROWSE_TRACE").is_some() {
+                        let st = self.tab.state.lock().unwrap();
+                        eprintln!(
+                            "[swiftbrowse] in-page load result: {v}; in flight: {:?}",
+                            st.inflight.values().collect::<Vec<_>>()
+                        );
+                    }
+                    return Ok(serde_json::from_value(v).ok());
+                }
+                // The document replaced itself mid-load: wait for the new one.
+                Ok(Err(_)) if self.newer_document(loader).is_some() => continue,
+                // Context gone for another reason (reload) or slow page: use the lifecycle path.
+                Ok(Err(_)) | Err(_) => return Ok(None),
+            }
         }
     }
 
-    async fn wait_lifecycle(&mut self, loader: &str, name: &str, timeout: Duration) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + timeout;
+    /// Waits for lifecycle event `name` of the document `loader`, following
+    /// client-side redirects to the newest document. `budget_ms` is only for
+    /// the error message (the navigation's whole timeout).
+    async fn wait_lifecycle(
+        &mut self,
+        loader: &mut String,
+        name: &str,
+        deadline: tokio::time::Instant,
+        budget_ms: u128,
+    ) -> Result<()> {
         loop {
             self.tab.lifecycle.borrow_and_update();
-            if self.tab.state.lock().unwrap().lifecycle.contains(&(loader.to_string(), name.to_string())) {
+            if let Some(newer) = self.newer_document(loader) {
+                *loader = newer;
+            }
+            if self.tab.state.lock().unwrap().lifecycle.contains(&(loader.clone(), name.to_string())) {
                 return Ok(());
             }
             match tokio::time::timeout_at(deadline, self.tab.lifecycle.changed()).await {
@@ -709,7 +739,7 @@ impl ChromiumBackend {
                 Err(_) => {
                     return Err(CoreError::new(
                         ErrorKind::Timeout,
-                        format!("navigation did not reach {name} within {} ms", timeout.as_millis()),
+                        format!("navigation did not reach {name} within {budget_ms} ms"),
                     ))
                 }
             }
@@ -1024,6 +1054,8 @@ async fn pump_events(
                     st.lifecycle.insert((s(p, "loaderId"), s(p, "name")));
                     if s(p, "name") == "init" {
                         st.last_init_loader = s(p, "loaderId");
+                        let loader = st.last_init_loader.clone();
+                        push_bounded(&mut st.inits, loader);
                     }
                     trace_event(&format!("lifecycle {}", s(p, "name")));
                     lifecycle.send_modify(|n| *n += 1);
@@ -1287,14 +1319,14 @@ impl Backend for ChromiumBackend {
         if !error.is_empty() {
             return Err(CoreError::new(ErrorKind::NavigationFailed, format!("{url}: {error}")));
         }
-        let loader = s(&r, "loaderId");
+        let mut loader = s(&r, "loaderId");
         let same_document = loader.is_empty();
         // Fast path for `load`: one evaluation in the new document that waits for
         // the load event inside the page and returns URL and title, instead of
         // waiting for the event here and then asking the page in a second round trip.
         if !same_document && wait_until == WaitUntil::Load {
             let deadline = tokio::time::Instant::from_std(started + timeout);
-            if let Some(page) = self.load_in_page(&loader, deadline).await? {
+            if let Some(page) = self.load_in_page(&mut loader, deadline).await? {
                 trace_event("in-page load resolved");
                 let status = self.tab.state.lock().unwrap().doc_status.get(&loader).copied();
                 return Ok(NavigationInfo {
@@ -1314,7 +1346,8 @@ impl Backend for ChromiumBackend {
                 WaitUntil::Load => "load",
                 WaitUntil::NetworkIdle => "networkIdle",
             };
-            self.wait_lifecycle(&loader, name, timeout.saturating_sub(started.elapsed())).await?;
+            let deadline = tokio::time::Instant::from_std(started + timeout);
+            self.wait_lifecycle(&mut loader, name, deadline, timeout.as_millis()).await?;
             trace(started, name);
         }
         let status = self.tab.state.lock().unwrap().doc_status.get(&loader).copied();
