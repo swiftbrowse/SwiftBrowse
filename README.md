@@ -67,7 +67,7 @@ A test file (see [`examples/e2e/tests`](examples/e2e/tests)):
 }
 ```
 
-- **Steps** are the same operations as the MCP tools and `run`: `navigate`, `click`, `fill`, `type_text`, `press_key`, `select_option`, `check`, `hover`, `go_back`, `go_forward`, `reload`, `evaluate`, `wait_for`, `assert_page_state`, `get_screenshot`, … A flow an agent worked out over MCP can be saved as a test unchanged.
+- **Steps** are the same operations as the MCP tools and `run`: `navigate`, `click`, `fill`, `type_text`, `press_key`, `select_option`, `check`, `hover`, `go_back`, `go_forward`, `reload`, `evaluate`, `wait_for`, `assert_page_state`, `get_screenshot`, tabs (`new_tab`, `list_tabs`, `switch_tab` which waits for popups, `close_tab`) and frames (`list_frames`, `switch_frame` into same-site, cross-site or nested iframes), … A flow an agent worked out over MCP can be saved as a test unchanged.
 - **Targets** are a string (`"Email"`: tries accessible name, label, test id, then text) or an explicit locator (`role`, `label`, `test_id`, `text`, `css`, `xpath`, with `nth`).
 - **Assertions auto-wait**: `expect` (one `condition` or several `conditions`) and `assert_page_state` retry until they pass or `--expect-timeout-ms` (5 s) runs out. Conditions: URL, title, visible/hidden, count, text visible/absent, element text equals/contains, value, enabled, checked, no console errors, no failed requests.
 - **Files**: `base_url` (relative `navigate` URLs), `vars` (`${name}`, `${env.NAME}`, overridable with `--var`), `before_each`/`after_each` (`after_each` always runs), per-test `skip`, `only`, `tags`, `retries`, `timeout_ms`. A plain `run` script (`name` + `steps`) is a one-test file.
@@ -75,7 +75,7 @@ A test file (see [`examples/e2e/tests`](examples/e2e/tests)):
 - **Reliability built into actions**: every click waits until the target is visible, enabled, not covered and not moving, and until the page's scripts have run. It is checked again *as the mouse goes down and up*: a click that would land elsewhere because the layout shifted is blocked and retried rather than lost.
 - In the runner, `evaluate` is allowed and consequential clicks ("Delete", "Pay") need no approval: tests target test environments. Over MCP both stay off unless `--allow-evaluate` / `--no-approval` are passed.
 
-**Not there yet** compared with Playwright Test: no trace viewer or video, no code-based tests (JSON only, until the TypeScript/Python SDKs), no network mocking, file upload, multi-tab or iframe steps, no storage-state reuse for logins, no visual comparison, Chromium only.
+**Not there yet** compared with Playwright Test: no trace viewer or video, no code-based tests (JSON only, until the TypeScript/Python SDKs), no network mocking, file upload, no storage-state reuse for logins, no visual comparison, Chromium only.
 
 ### Benchmark vs Playwright Test
 
@@ -215,6 +215,6 @@ Run it: `cd bench && npm install && node bench.mjs ../target/release/swiftbrowse
 | Desktop shell (Tauri/Wry) | not started; `doctor` reports WebView availability |
 | Remote/authenticated MCP transport | not started |
 | TypeScript / Python SDKs | not started |
-| Frames, downloads, uploads, visual grounding | reported `partial`/`unsupported` in capabilities |
+| Downloads, uploads, visual grounding | reported `unsupported` in capabilities |
 
-Known limitations: only the main frame is supported, CSS doesn't pierce shadow roots, and consequential-action detection uses text patterns, not semantics. Set `SWIFTBROWSE_TRACE=1` for launch and navigation phase timings.
+Known limitations: actions work in one frame at a time (`switch_frame`), CSS doesn't pierce shadow roots, and consequential-action detection uses text patterns, not semantics. Set `SWIFTBROWSE_TRACE=1` for launch and navigation phase timings.

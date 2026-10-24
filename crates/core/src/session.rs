@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, FrameRef};
 use crate::capability::{names, CapabilityReport, Support};
 use crate::error::{CoreError, ErrorKind, Result};
 use crate::locator::{Locator, Target};
@@ -486,6 +486,127 @@ impl Session {
                 let value = self.backend.evaluate(&a.expression, Duration::from_millis(timeout)).await?;
                 ctx.verification = Some(not_checked("script ran; its result is returned as data"));
                 Ok(Some(json!({ "value": value })))
+            }
+            Request::NewTab(a) => {
+                let url = a.url.as_deref().map(|u| p.check_navigation(u)).transpose()?;
+                let timeout = p.timeout(a.timeout_ms);
+                ctx.timeout_ms = Some(timeout);
+                self.backend.new_tab().await?;
+                self.last_snapshot = None;
+                if let Some(url) = url {
+                    self.backend.navigate(url.as_str(), a.wait_until, Duration::from_millis(timeout)).await?;
+                }
+                let tabs = self.backend.tabs().await?;
+                Ok(Some(json!({ "tabs": tabs })))
+            }
+            Request::ListTabs(_) => {
+                let tabs = self.backend.tabs().await?;
+                Ok(Some(json!({ "tabs": tabs })))
+            }
+            Request::SwitchTab(a) => {
+                let timeout = p.timeout(a.timeout_ms);
+                ctx.timeout_ms = Some(timeout);
+                if a.index.is_none() && a.url_contains.is_none() && a.title_contains.is_none() && !a.last {
+                    return Err(CoreError::invalid("switch_tab needs index, url_contains, title_contains or last"));
+                }
+                let mut poll = Poll::new(timeout);
+                let tab = loop {
+                    let tabs = self.backend.tabs().await?;
+                    let mut matching = tabs.iter().filter(|t| {
+                        a.index.is_none_or(|i| t.index == i)
+                            && a.url_contains.as_deref().is_none_or(|u| t.url.contains(u))
+                            && a.title_contains.as_deref().is_none_or(|x| t.title.contains(x))
+                    });
+                    let found = if a.last { matching.next_back() } else { matching.next() };
+                    if let Some(t) = found {
+                        break t.clone();
+                    }
+                    if !poll.next().await {
+                        return Err(CoreError::new(ErrorKind::NotFound, "no matching tab opened")
+                            .with_details(json!({ "tabs": tabs })));
+                    }
+                };
+                // Popups can lead anywhere: the navigation policy applies to them too.
+                if !tab.url.is_empty() && tab.url != "about:blank" {
+                    p.check_navigation(&tab.url).map_err(|e| {
+                        CoreError::new(ErrorKind::PermissionDenied, format!("tab is outside the policy: {}", e.message))
+                    })?;
+                }
+                self.backend.switch_tab(tab.index).await?;
+                self.last_snapshot = None;
+                let page = self.backend.page_state().await?;
+                Ok(Some(json!({ "index": tab.index, "url": page.url, "title": page.title })))
+            }
+            Request::CloseTab(a) => {
+                let tabs = self.backend.tabs().await?;
+                let index = match a.index {
+                    Some(i) => i,
+                    None => tabs.iter().find(|t| t.active).map(|t| t.index).unwrap_or(0),
+                };
+                if tabs.len() <= 1 {
+                    return Err(CoreError::invalid("cannot close the last tab; close the session instead"));
+                }
+                self.backend.close_tab(index).await?;
+                self.last_snapshot = None;
+                let tabs = self.backend.tabs().await?;
+                Ok(Some(json!({ "tabs": tabs })))
+            }
+            Request::ListFrames(_) => {
+                let frames = self.backend.frames().await?;
+                Ok(Some(json!({ "frames": frames })))
+            }
+            Request::SwitchFrame(a) => {
+                let timeout = p.timeout(a.timeout_ms);
+                ctx.timeout_ms = Some(timeout);
+                let mut poll = Poll::new(timeout);
+                let chosen = [a.target.is_some(), a.name.is_some(), a.url_contains.is_some(), a.main];
+                if chosen.iter().filter(|c| **c).count() != 1 {
+                    return Err(CoreError::invalid(
+                        "switch_frame needs exactly one of target, name, url_contains or main",
+                    ));
+                }
+                let frame = if a.main {
+                    None
+                } else if let Some(t) = &a.target {
+                    t.locator.validate()?;
+                    let el = loop {
+                        match self.resolve(t).await {
+                            Ok(r) => break r.element,
+                            Err(e) if e.recoverable && poll.next().await => continue,
+                            Err(e) => return Err(e),
+                        }
+                    };
+                    if el.tag != "iframe" && el.tag != "frame" {
+                        return Err(CoreError::invalid(format!("{} is a <{}>, not an <iframe>", el.ref_id, el.tag)));
+                    }
+                    Some(FrameRef::Element(el.ref_id))
+                } else {
+                    let id = loop {
+                        let frames = self.backend.frames().await?;
+                        let hit = frames.iter().skip(1).find(|f| {
+                            a.name.as_deref().is_none_or(|n| f.name == n)
+                                && a.url_contains.as_deref().is_none_or(|u| f.url.contains(u))
+                        });
+                        if let Some(f) = hit {
+                            break f.id.clone();
+                        }
+                        if !poll.next().await {
+                            return Err(CoreError::new(ErrorKind::NotFound, "no matching frame")
+                                .with_details(json!({ "frames": frames })));
+                        }
+                    };
+                    Some(FrameRef::Id(id))
+                };
+                // A frame can still be loading right after its element appears.
+                let info = loop {
+                    match self.backend.enter_frame(frame.clone()).await {
+                        Ok(info) => break info,
+                        Err(e) if e.recoverable && poll.next().await => continue,
+                        Err(e) => return Err(e),
+                    }
+                };
+                self.last_snapshot = None;
+                Ok(Some(serde_json::to_value(info).unwrap_or_default()))
             }
             Request::GetScreenshot(a) => {
                 let stem = a.name.clone().unwrap_or_else(|| action_id.to_string());

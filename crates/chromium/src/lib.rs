@@ -18,7 +18,7 @@ use swiftbrowse_core::capability::{cap, names};
 use swiftbrowse_core::model::*;
 use swiftbrowse_core::request::{SnapshotMode, WaitUntil};
 use swiftbrowse_core::{
-    Backend, BackendFactory, CapabilityReport, CoreError, ErrorKind, Locator, Result, SessionOptions, Support,
+    Backend, BackendFactory, CapabilityReport, CoreError, ErrorKind, FrameRef, Locator, Result, SessionOptions, Support,
 };
 use tokio::sync::watch;
 
@@ -126,19 +126,68 @@ struct State {
     network: VecDeque<NetworkFailure>,
     dialogs: VecDeque<DialogEvent>,
     dialogs_reported: usize,
+    /// Main-world execution context of each same-process frame (for `evaluate` in a frame).
+    frame_contexts: HashMap<String, i64>,
+}
+
+/// One page target (tab) of this session.
+struct Tab {
+    target_id: String,
+    session: String,
+    state: Arc<Mutex<State>>,
+    lifecycle: watch::Receiver<u64>,
+    pump: tokio::task::JoinHandle<()>,
+}
+
+/// A page target this session can see, from `Target.*` events.
+#[derive(Clone, Debug, Default)]
+struct TargetSeen {
+    target_id: String,
+    url: String,
+    title: String,
+    opener: Option<String>,
+}
+
+/// Shared between the event router and the backend.
+#[derive(Default)]
+struct Shared {
+    /// Event channel of each attached page session.
+    routes: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<Event>>>,
+    /// Page targets in creation order.
+    pages: Mutex<Vec<TargetSeen>>,
+    /// Out-of-process iframes: frame (= target) id -> session id.
+    iframes: Mutex<HashMap<String, String>>,
+}
+
+/// One level of the frame the session is working in.
+#[derive(Clone, Debug)]
+struct FrameLevel {
+    frame_id: String,
+    /// Session hosting this frame's document (the page, or an out-of-process iframe).
+    session: String,
+    /// The `<iframe>` element in the parent document, and the session hosting it.
+    owner: i64,
+    owner_session: String,
 }
 
 pub struct ChromiumBackend {
     cdp: Cdp,
-    session: String,
-    state: Arc<Mutex<State>>,
-    lifecycle: watch::Receiver<u64>,
+    /// The tab actions go to.
+    tab: Tab,
+    /// Other open tabs.
+    others: Vec<Tab>,
+    shared: Arc<Shared>,
+    router: tokio::task::JoinHandle<()>,
+    viewport: (u32, u32),
+    /// Frames entered with `enter_frame`, outermost first; empty means the main frame.
+    frame: Vec<FrameLevel>,
+    /// Isolated world (context id, helper installed) in the innermost entered frame.
+    frame_world: Mutex<Option<(i64, bool)>>,
     /// The browser process, when this session owns one (not when attached to the daemon).
     child: Option<tokio::process::Child>,
     profile: Option<tempfile::TempDir>,
     /// The browser context this session owns inside the shared daemon browser.
     daemon_context: Option<String>,
-    pump: tokio::task::JoinHandle<()>,
     version: Option<String>,
     headless_shell: bool,
     /// Document generation when the last click was dispatched.
@@ -182,9 +231,12 @@ impl ChromiumBackend {
 
         // Each session already owns a browser process and a throwaway profile, so
         // the initial tab is isolated; reuse it rather than creating a context.
-        let (version, targets) = tokio::join!(
+        // Discovery reports tabs the page opens (popups, target=_blank). (The
+        // daemon does this itself and forwards a client its own tabs.)
+        let (version, targets, _) = tokio::join!(
             cdp.send("Browser.getVersion", json!({}), None, CMD_TIMEOUT),
             cdp.send("Target.getTargets", json!({}), None, CMD_TIMEOUT),
+            cdp.send("Target.setDiscoverTargets", json!({ "discover": true }), None, CMD_TIMEOUT),
         );
         let version = version.ok().map(|v| s(&v, "product"));
         let existing = targets.map_err(&startup_error)?["targetInfos"]
@@ -243,7 +295,7 @@ impl ChromiumBackend {
         Ok(backend)
     }
 
-    /// Attaches to a page target and enables everything a session needs.
+    /// Starts the event router and attaches the first tab.
     /// `prepared`: a session the daemon already attached and set up (see
     /// [`session_setup`]); otherwise this attaches and sets up a new one.
     async fn open_page(
@@ -254,56 +306,22 @@ impl ChromiumBackend {
         options: &SessionOptions,
         t0: Instant,
     ) -> Result<Self> {
-        let trace = |phase: &str| trace(t0, phase);
-        let session = match &prepared {
-            Some(session) => session.clone(),
-            None => {
-                let attached = cdp
-                    .send("Target.attachToTarget", json!({ "targetId": target_id, "flatten": true }), None, CMD_TIMEOUT)
-                    .await?;
-                s(&attached, "sessionId")
-            }
-        };
-        trace("page target attached");
-
-        let state = Arc::new(Mutex::new(State::default()));
-        let (lc_tx, lc_rx) = watch::channel(0u64);
-        let pump = tokio::spawn(pump_events(events, cdp.clone(), session.clone(), state.clone(), lc_tx));
-
-        // Independent setup commands go out together instead of one round trip each.
-        let sid = Some(session.as_str());
-        let setup = match prepared {
-            None => session_setup(options.viewport),
-            // Already done by the daemon with the default viewport.
-            Some(_) if options.viewport == SessionOptions::default().viewport => Vec::new(),
-            Some(_) => {
-                session_setup(options.viewport).into_iter().filter(|(m, _)| m.starts_with("Emulation.")).collect()
-            }
-        };
-        // A page target's main frame id is its target id. Set it before setup so
-        // lifecycle events for the first document are recognised.
-        state.lock().unwrap().main_frame = target_id.clone();
-        // Sent together, confirmed together. (Not waiting for these replies before
-        // the first navigation was measured: no faster, and early network events
-        // could be missed.)
-        let pending: Vec<cdp::Pending1> = setup.into_iter().map(|(m, p)| cdp.enqueue(m, p, sid)).collect();
-        for reply in pending {
-            reply
-                .wait(CMD_TIMEOUT)
-                .await
-                .map_err(|e| CoreError::backend(format!("session setup failed: {}", e.message)))?;
-        }
-        trace("page domains enabled");
-
+        let shared = Arc::new(Shared::default());
+        shared.pages.lock().unwrap().push(TargetSeen { target_id: target_id.clone(), ..Default::default() });
+        let router = tokio::spawn(route_events(events, shared.clone()));
+        let tab = open_tab(&cdp, &shared, target_id, prepared, options.viewport, t0).await?;
         Ok(Self {
             cdp,
-            session,
-            state,
-            lifecycle: lc_rx,
+            tab,
+            others: Vec::new(),
+            shared,
+            router,
+            viewport: options.viewport,
+            frame: Vec::new(),
+            frame_world: Mutex::new(None),
             child: None,
             profile: None,
             daemon_context: None,
-            pump,
             version: None,
             worlds_at_click: 0,
             headless_shell: false,
@@ -313,12 +331,12 @@ impl ChromiumBackend {
     }
 
     async fn send(&self, method: &str, params: Value) -> Result<Value> {
-        self.cdp.send(method, params, Some(&self.session), CMD_TIMEOUT).await
+        self.cdp.send(method, params, Some(&self.tab.session), CMD_TIMEOUT).await
     }
 
     async fn world(&self) -> Result<i64> {
         let (cached, frame) = {
-            let st = self.state.lock().unwrap();
+            let st = self.tab.state.lock().unwrap();
             (st.world, st.main_frame.clone())
         };
         if let Some(id) = cached {
@@ -331,17 +349,20 @@ impl ChromiumBackend {
             )
             .await?;
         let id = r["executionContextId"].as_i64().ok_or_else(|| CoreError::backend("no isolated world id"))?;
-        self.state.lock().unwrap().world = Some(id);
+        self.tab.state.lock().unwrap().world = Some(id);
         Ok(id)
     }
 
     /// Calls `__sb.<func>(...args)` in the isolated world, installing the helper when needed.
     async fn call(&self, func: &str, args: Value) -> Result<Value> {
+        if !self.frame.is_empty() {
+            return self.frame_call(func, args).await;
+        }
         let args = args.to_string();
         let mut last = CoreError::backend("isolated world unavailable");
         for _ in 0..4 {
             let ctx = self.world().await?;
-            let installed = self.state.lock().unwrap().helper_in == Some(ctx);
+            let installed = self.tab.state.lock().unwrap().helper_in == Some(ctx);
             // Never assume the helper exists: Chromium can create the named world
             // in a document where the start-up script did not run.
             let call = format!("globalThis.__sb ? globalThis.__sb.{func}(...{args}) : {HELPER_MISSING:?}");
@@ -357,7 +378,7 @@ impl ChromiumBackend {
                     if let Some(ex) = v.get("exceptionDetails") {
                         let err = js_error(ex);
                         if installed && err.message.contains("__sb") {
-                            self.state.lock().unwrap().helper_in = None;
+                            self.tab.state.lock().unwrap().helper_in = None;
                             last = err;
                             continue;
                         }
@@ -365,16 +386,16 @@ impl ChromiumBackend {
                     }
                     let value = v["result"].get("value").cloned().unwrap_or(Value::Null);
                     if value.as_str() == Some(HELPER_MISSING) {
-                        self.state.lock().unwrap().helper_in = None;
+                        self.tab.state.lock().unwrap().helper_in = None;
                         last = CoreError::backend("helper missing in page world");
                         continue;
                     }
-                    self.state.lock().unwrap().helper_in = Some(ctx);
+                    self.tab.state.lock().unwrap().helper_in = Some(ctx);
                     return Ok(value);
                 }
                 Err(e) if context_gone(&e) => {
                     {
-                        let mut st = self.state.lock().unwrap();
+                        let mut st = self.tab.state.lock().unwrap();
                         if st.world == Some(ctx) {
                             st.world = None;
                         }
@@ -386,6 +407,151 @@ impl ChromiumBackend {
             }
         }
         Err(last)
+    }
+
+    /// `call` inside the entered frame: its own isolated world, made on demand.
+    async fn frame_call(&self, func: &str, args: Value) -> Result<Value> {
+        let level = self.frame.last().expect("in a frame");
+        let args = args.to_string();
+        let mut last = CoreError::backend("frame world unavailable");
+        for _ in 0..4 {
+            let cached = *self.frame_world.lock().unwrap();
+            let (ctx, installed) = match cached {
+                Some(w) => w,
+                None => {
+                    let params = json!({ "frameId": level.frame_id, "worldName": WORLD, "grantUniveralAccess": false });
+                    let r = self
+                        .cdp
+                        .send("Page.createIsolatedWorld", params, Some(&level.session), CMD_TIMEOUT)
+                        .await
+                        .map_err(|e| {
+                            CoreError::new(
+                                ErrorKind::StaleElement,
+                                format!("the frame is gone or not loaded: {}", e.message),
+                            )
+                        })?;
+                    let id = r["executionContextId"].as_i64().ok_or_else(|| CoreError::backend("no frame world id"))?;
+                    (id, false)
+                }
+            };
+            let call = format!("globalThis.__sb ? globalThis.__sb.{func}(...{args}) : {HELPER_MISSING:?}");
+            let expr = if installed { call } else { format!("{HELPER}\n{call}") };
+            let params = json!({ "expression": expr, "contextId": ctx, "returnByValue": true, "awaitPromise": true });
+            match self.cdp.send("Runtime.evaluate", params, Some(&level.session), CMD_TIMEOUT).await {
+                Ok(v) => {
+                    if let Some(ex) = v.get("exceptionDetails") {
+                        let err = js_error(ex);
+                        if installed && err.message.contains("__sb") {
+                            *self.frame_world.lock().unwrap() = Some((ctx, false));
+                            last = err;
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                    let value = v["result"].get("value").cloned().unwrap_or(Value::Null);
+                    if value.as_str() == Some(HELPER_MISSING) {
+                        *self.frame_world.lock().unwrap() = Some((ctx, false));
+                        continue;
+                    }
+                    *self.frame_world.lock().unwrap() = Some((ctx, true));
+                    return Ok(value);
+                }
+                Err(e) if context_gone(&e) => {
+                    *self.frame_world.lock().unwrap() = None;
+                    last = e;
+                    tokio::task::yield_now().await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last)
+    }
+
+    /// Session hosting the document actions currently go to.
+    fn context_session(&self) -> &str {
+        self.frame.last().map(|f| f.session.as_str()).unwrap_or(&self.tab.session)
+    }
+
+    /// Where the entered frame's viewport sits in the page's viewport, scrolling
+    /// the `<iframe>` into view first.
+    async fn frame_offset(&self) -> Result<(f64, f64)> {
+        let (mut x, mut y) = (0.0, 0.0);
+        for (i, level) in self.frame.iter().enumerate() {
+            // Box models are relative to the hosting session's top frame, so within
+            // one session only the innermost `<iframe>` counts.
+            if self.frame.get(i + 1).is_some_and(|next| next.owner_session == level.owner_session) {
+                continue;
+            }
+            let node = json!({ "backendNodeId": level.owner });
+            let _ = self
+                .cdp
+                .send("DOM.scrollIntoViewIfNeeded", node.clone(), Some(&level.owner_session), CMD_TIMEOUT)
+                .await;
+            let m = self.cdp.send("DOM.getBoxModel", node, Some(&level.owner_session), CMD_TIMEOUT).await?;
+            let q = &m["model"]["content"];
+            x += q[0].as_f64().unwrap_or(0.0);
+            y += q[1].as_f64().unwrap_or(0.0);
+        }
+        Ok((x, y))
+    }
+
+    /// The element behind a helper ref, as a remote object id in the current frame.
+    async fn element_object(&self, ref_id: &str) -> Result<String> {
+        // Validates the ref (stale, unknown) with the helper's own errors first.
+        self.call("describe", json!([ref_id])).await?;
+        let (session, ctx) = match self.frame.last() {
+            Some(level) => (level.session.clone(), self.frame_world.lock().unwrap().map(|w| w.0)),
+            None => (self.tab.session.clone(), self.tab.state.lock().unwrap().world),
+        };
+        let ctx =
+            ctx.ok_or_else(|| CoreError::new(ErrorKind::StaleElement, "the page changed; look the element up again"))?;
+        let params = json!({ "expression": format!("globalThis.__sb.element({ref_id:?})"), "contextId": ctx });
+        let r = self.cdp.send("Runtime.evaluate", params, Some(&session), CMD_TIMEOUT).await?;
+        if let Some(ex) = r.get("exceptionDetails") {
+            return Err(js_error(ex));
+        }
+        r["result"]["objectId"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| CoreError::backend("element has no object id"))
+    }
+
+    /// URL and title of the active tab's main document, even inside a frame.
+    async fn page_state_of_tab(&self) -> Result<PageState> {
+        if self.frame.is_empty() {
+            let v = self.call("pageState", json!([])).await?;
+            return serde_json::from_value(v).map_err(|e| CoreError::backend(e.to_string()));
+        }
+        let r = self
+            .send(
+                "Runtime.evaluate",
+                json!({ "expression": "({ url: location.href, title: document.title })", "returnByValue": true }),
+            )
+            .await?;
+        serde_json::from_value(r["result"]["value"].clone()).map_err(|e| CoreError::backend(e.to_string()))
+    }
+
+    fn leave_frames(&mut self) {
+        self.frame.clear();
+        *self.frame_world.lock().unwrap() = None;
+    }
+
+    /// Makes the tab with this target active, attaching to it first if needed.
+    async fn activate(&mut self, target_id: &str) -> Result<()> {
+        if self.tab.target_id == target_id {
+            return Ok(());
+        }
+        let tab = match self.others.iter().position(|t| t.target_id == target_id) {
+            Some(i) => self.others.remove(i),
+            None => {
+                open_tab(&self.cdp, &self.shared, target_id.to_string(), None, self.viewport, Instant::now()).await?
+            }
+        };
+        let previous = std::mem::replace(&mut self.tab, tab);
+        self.others.push(previous);
+        self.leave_frames();
+        let _ = self.send("Page.bringToFront", json!({})).await;
+        Ok(())
     }
 
     async fn key(&self, stroke: keys::KeyStroke) -> Result<()> {
@@ -400,14 +566,14 @@ impl ChromiumBackend {
     /// that document is used.
     async fn load_in_page(&mut self, loader: &str, deadline: tokio::time::Instant) -> Result<Option<Loaded>> {
         loop {
-            self.lifecycle.borrow_and_update();
+            self.tab.lifecycle.borrow_and_update();
             {
-                let st = self.state.lock().unwrap();
+                let st = self.tab.state.lock().unwrap();
                 if st.world.is_some() && st.world_loader == loader {
                     break;
                 }
             }
-            match tokio::time::timeout_at(deadline, self.lifecycle.changed()).await {
+            match tokio::time::timeout_at(deadline, self.tab.lifecycle.changed()).await {
                 Ok(Ok(())) => continue,
                 Ok(Err(_)) => return Err(CoreError::backend("browser connection closed")),
                 Err(_) => return Ok(None),
@@ -418,7 +584,7 @@ impl ChromiumBackend {
         match tokio::time::timeout_at(deadline, self.call("loaded", json!([render_ms]))).await {
             Ok(Ok(v)) => {
                 if std::env::var_os("SWIFTBROWSE_TRACE").is_some() {
-                    let st = self.state.lock().unwrap();
+                    let st = self.tab.state.lock().unwrap();
                     eprintln!(
                         "[swiftbrowse] in-page load result: {v}; in flight: {:?}",
                         st.inflight.values().collect::<Vec<_>>()
@@ -434,11 +600,11 @@ impl ChromiumBackend {
     async fn wait_lifecycle(&mut self, loader: &str, name: &str, timeout: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            self.lifecycle.borrow_and_update();
-            if self.state.lock().unwrap().lifecycle.contains(&(loader.to_string(), name.to_string())) {
+            self.tab.lifecycle.borrow_and_update();
+            if self.tab.state.lock().unwrap().lifecycle.contains(&(loader.to_string(), name.to_string())) {
                 return Ok(());
             }
-            match tokio::time::timeout_at(deadline, self.lifecycle.changed()).await {
+            match tokio::time::timeout_at(deadline, self.tab.lifecycle.changed()).await {
                 Ok(Ok(())) => continue,
                 Ok(Err(_)) => return Err(CoreError::backend("browser connection closed")),
                 Err(_) => {
@@ -456,7 +622,11 @@ impl Drop for ChromiumBackend {
     /// Sessions dropped without `close` must not leak a browser or its profile:
     /// kill the process and let it exit before the profile directory is removed.
     fn drop(&mut self) {
-        self.pump.abort();
+        self.router.abort();
+        self.tab.pump.abort();
+        for t in &self.others {
+            t.pump.abort();
+        }
         if let Some(child) = self.child.as_mut() {
             if matches!(child.try_wait(), Ok(None)) {
                 let _ = child.start_kill();
@@ -492,6 +662,11 @@ pub(crate) fn session_setup(viewport: (u32, u32)) -> Vec<(&'static str, Value)> 
         // Chromium creates the isolated world and runs the helper itself on every
         // new document, saving two round trips after each navigation.
         ("Page.addScriptToEvaluateOnNewDocument", json!({ "source": HELPER, "worldName": WORLD })),
+        // Out-of-process (cross-site) iframes get their own sessions, for `enter_frame`.
+        (
+            "Target.setAutoAttach",
+            json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true, "filter": [{ "type": "iframe" }] }),
+        ),
         (
             "Emulation.setDeviceMetricsOverride",
             json!({ "width": viewport.0, "height": viewport.1, "deviceScaleFactor": 1, "mobile": false }),
@@ -540,6 +715,114 @@ fn js_error(ex: &Value) -> CoreError {
     CoreError::backend(format!("page script error: {}", desc.lines().next().unwrap_or_default()))
 }
 
+/// Attaches to a page target (unless `prepared` already is) and enables
+/// everything a session needs.
+async fn open_tab(
+    cdp: &Cdp,
+    shared: &Arc<Shared>,
+    target_id: String,
+    prepared: Option<String>,
+    viewport: (u32, u32),
+    t0: Instant,
+) -> Result<Tab> {
+    let session = match &prepared {
+        Some(session) => session.clone(),
+        None => {
+            let attached = cdp
+                .send("Target.attachToTarget", json!({ "targetId": target_id, "flatten": true }), None, CMD_TIMEOUT)
+                .await?;
+            s(&attached, "sessionId")
+        }
+    };
+    trace(t0, "page target attached");
+
+    let state = Arc::new(Mutex::new(State::default()));
+    // A page target's main frame id is its target id. Set it before setup so
+    // lifecycle events for the first document are recognised.
+    state.lock().unwrap().main_frame = target_id.clone();
+    let (lc_tx, lc_rx) = watch::channel(0u64);
+    let (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel();
+    shared.routes.lock().unwrap().insert(session.clone(), ev_tx);
+    let pump = tokio::spawn(pump_events(ev_rx, cdp.clone(), session.clone(), state.clone(), lc_tx));
+
+    let sid = Some(session.as_str());
+    let setup = match prepared {
+        None => session_setup(viewport),
+        // Already done by the daemon with the default viewport.
+        Some(_) if viewport == SessionOptions::default().viewport => Vec::new(),
+        Some(_) => session_setup(viewport).into_iter().filter(|(m, _)| m.starts_with("Emulation.")).collect(),
+    };
+    // Sent together, confirmed together. (Not waiting for these replies before
+    // the first navigation was measured: no faster, and early network events
+    // could be missed.)
+    let pending: Vec<cdp::Pending1> = setup.into_iter().map(|(m, p)| cdp.enqueue(m, p, sid)).collect();
+    for reply in pending {
+        reply
+            .wait(CMD_TIMEOUT)
+            .await
+            .map_err(|e| CoreError::backend(format!("session setup failed: {}", e.message)))?;
+    }
+    trace(t0, "page domains enabled");
+    Ok(Tab { target_id, session, state, lifecycle: lc_rx, pump })
+}
+
+/// Sends each event to the tab whose session it belongs to, and keeps the
+/// list of page targets and out-of-process iframes up to date.
+async fn route_events(mut events: tokio::sync::mpsc::UnboundedReceiver<Event>, shared: Arc<Shared>) {
+    while let Some(ev) = events.recv().await {
+        let p = &ev.params;
+        match ev.session_id.as_deref() {
+            Some(session) => {
+                match ev.method.as_str() {
+                    "Target.attachedToTarget" if s(&p["targetInfo"], "type") == "iframe" => {
+                        let frame = s(&p["targetInfo"], "targetId");
+                        shared.iframes.lock().unwrap().insert(frame, s(p, "sessionId"));
+                    }
+                    "Target.detachedFromTarget" => {
+                        let gone = s(p, "sessionId");
+                        shared.iframes.lock().unwrap().retain(|_, s| *s != gone);
+                    }
+                    _ => {}
+                }
+                let tx = shared.routes.lock().unwrap().get(session).cloned();
+                if let Some(tx) = tx {
+                    let _ = tx.send(ev);
+                }
+            }
+            None => {
+                let info = &p["targetInfo"];
+                match ev.method.as_str() {
+                    "Target.targetCreated" | "Target.targetInfoChanged" if s(info, "type") == "page" => {
+                        let seen = TargetSeen {
+                            target_id: s(info, "targetId"),
+                            url: s(info, "url"),
+                            title: s(info, "title"),
+                            opener: info.get("openerId").and_then(Value::as_str).map(str::to_string),
+                        };
+                        let mut pages = shared.pages.lock().unwrap();
+                        match pages.iter_mut().find(|t| t.target_id == seen.target_id) {
+                            Some(t) => {
+                                t.url = seen.url;
+                                t.title = seen.title;
+                                if seen.opener.is_some() {
+                                    t.opener = seen.opener;
+                                }
+                            }
+                            None if ev.method == "Target.targetCreated" => pages.push(seen),
+                            None => {}
+                        }
+                    }
+                    "Target.targetDestroyed" => {
+                        let id = s(p, "targetId");
+                        shared.pages.lock().unwrap().retain(|t| t.target_id != id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 async fn pump_events(
     mut events: tokio::sync::mpsc::UnboundedReceiver<Event>,
     cdp: Cdp,
@@ -569,6 +852,11 @@ async fn pump_events(
             }
             "Runtime.executionContextCreated" => {
                 let c = &p["context"];
+                if c["auxData"]["isDefault"].as_bool() == Some(true) {
+                    if let Some(id) = c["id"].as_i64() {
+                        st.frame_contexts.insert(s(&c["auxData"], "frameId"), id);
+                    }
+                }
                 if s(c, "name") == WORLD && s(&c["auxData"], "frameId") == st.main_frame {
                     let id = c["id"].as_i64();
                     st.world = id;
@@ -583,11 +871,16 @@ async fn pump_events(
                 }
             }
             "Runtime.executionContextDestroyed" => {
-                if st.world == p["executionContextId"].as_i64() {
+                let id = p["executionContextId"].as_i64();
+                if st.world == id {
                     st.world = None;
                 }
+                st.frame_contexts.retain(|_, c| Some(*c) != id);
             }
-            "Runtime.executionContextsCleared" => st.world = None,
+            "Runtime.executionContextsCleared" => {
+                st.world = None;
+                st.frame_contexts.clear();
+            }
             "Runtime.consoleAPICalled" => {
                 let kind = s(p, "type");
                 if kind == "error" || kind == "assert" {
@@ -746,7 +1039,7 @@ impl Backend for ChromiumBackend {
                 cap(names::CONSOLE, Support::Full, None),
                 cap(names::NETWORK, Support::Full, None),
                 cap(names::DIALOGS, Support::Partial, Some("alerts accepted, confirm/prompt dismissed automatically and reported")),
-                cap(names::FRAMES, Support::Partial, Some("main frame only")),
+                cap(names::FRAMES, Support::Full, Some("switch_frame into same-site, cross-site and nested iframes; one frame at a time")),
                 cap(names::SHADOW_DOM, Support::Partial, Some("open shadow roots for semantic and text locators; CSS does not pierce")),
                 if self.daemon_context.is_some() {
                     cap(names::ISOLATED_SESSIONS, Support::Partial, Some("separate browser context per session in a shared browser"))
@@ -764,7 +1057,8 @@ impl Backend for ChromiumBackend {
     async fn navigate(&mut self, url: &str, wait_until: WaitUntil, timeout: Duration) -> Result<NavigationInfo> {
         let started = Instant::now();
         trace_event("navigate start");
-        let r = self.cdp.send("Page.navigate", json!({ "url": url }), Some(&self.session), timeout).await?;
+        self.leave_frames();
+        let r = self.cdp.send("Page.navigate", json!({ "url": url }), Some(&self.tab.session), timeout).await?;
         trace_event("Page.navigate replied");
         let error = s(&r, "errorText");
         if !error.is_empty() {
@@ -779,7 +1073,7 @@ impl Backend for ChromiumBackend {
             let deadline = tokio::time::Instant::from_std(started + timeout);
             if let Some(page) = self.load_in_page(&loader, deadline).await? {
                 trace_event("in-page load resolved");
-                let status = self.state.lock().unwrap().doc_status.get(&loader).copied();
+                let status = self.tab.state.lock().unwrap().doc_status.get(&loader).copied();
                 return Ok(NavigationInfo {
                     url: page.url,
                     title: page.title,
@@ -800,7 +1094,7 @@ impl Backend for ChromiumBackend {
             self.wait_lifecycle(&loader, name, timeout.saturating_sub(started.elapsed())).await?;
             trace(started, name);
         }
-        let status = self.state.lock().unwrap().doc_status.get(&loader).copied();
+        let status = self.tab.state.lock().unwrap().doc_status.get(&loader).copied();
         let mut settled = Loaded::default();
         if !same_document && wait_until != WaitUntil::NetworkIdle {
             let render_ms = RENDER_WAIT.min(timeout.saturating_sub(started.elapsed())).as_millis() as u64;
@@ -832,7 +1126,7 @@ impl Backend for ChromiumBackend {
         let mode = if mode == SnapshotMode::Full { "full" } else { "compact" };
         let v = self.call("snapshot", json!([mode, max_elements, RENDER_WAIT.as_millis() as u64])).await?;
         let mut snap: PageSnapshot = serde_json::from_value(v).map_err(|e| CoreError::backend(e.to_string()))?;
-        let mut st = self.state.lock().unwrap();
+        let mut st = self.tab.state.lock().unwrap();
         let from = st.dialogs_reported.min(st.dialogs.len());
         for d in st.dialogs.iter().skip(from) {
             snap.messages.push(Message {
@@ -865,8 +1159,9 @@ impl Backend for ChromiumBackend {
 
     async fn click(&mut self, ref_id: &str) -> Result<()> {
         let pt = self.call("prepareClick", json!([ref_id])).await?;
-        self.worlds_at_click = self.state.lock().unwrap().worlds_created;
-        let (x, y) = (pt["x"].as_f64().unwrap_or(0.0), pt["y"].as_f64().unwrap_or(0.0));
+        self.worlds_at_click = self.tab.state.lock().unwrap().worlds_created;
+        let (ox, oy) = self.frame_offset().await?;
+        let (x, y) = (pt["x"].as_f64().unwrap_or(0.0) + ox, pt["y"].as_f64().unwrap_or(0.0) + oy);
         // Queue move, press and release together: waiting for each acknowledgement
         // leaves time for the page to shift the layout between press and release.
         let events = [
@@ -874,8 +1169,10 @@ impl Backend for ChromiumBackend {
             json!({ "type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 }),
             json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1 }),
         ];
-        let pending: Vec<_> =
-            events.into_iter().map(|e| self.cdp.enqueue("Input.dispatchMouseEvent", e, Some(&self.session))).collect();
+        let pending: Vec<_> = events
+            .into_iter()
+            .map(|e| self.cdp.enqueue("Input.dispatchMouseEvent", e, Some(&self.tab.session)))
+            .collect();
         for p in pending {
             // Input may have reached the page: never report a retryable kind from here.
             p.wait(CMD_TIMEOUT)
@@ -950,7 +1247,8 @@ impl Backend for ChromiumBackend {
 
     async fn hover(&mut self, ref_id: &str) -> Result<()> {
         let pt = self.call("pointAt", json!([ref_id])).await?;
-        let (x, y) = (pt["x"].as_f64().unwrap_or(0.0), pt["y"].as_f64().unwrap_or(0.0));
+        let (ox, oy) = self.frame_offset().await?;
+        let (x, y) = (pt["x"].as_f64().unwrap_or(0.0) + ox, pt["y"].as_f64().unwrap_or(0.0) + oy);
         self.send("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y, "buttons": 0 }))
             .await
             .map(|_| ())
@@ -970,6 +1268,7 @@ impl Backend for ChromiumBackend {
             ready: String,
         }
         let started = Instant::now();
+        self.leave_frames();
         let doc = |v: Value| serde_json::from_value::<Doc>(v).unwrap_or_default();
         let before = doc(self.call("docState", json!([])).await?);
         let target_url = if delta == 0 {
@@ -1027,19 +1326,242 @@ impl Backend for ChromiumBackend {
     }
 
     async fn evaluate(&mut self, expression: &str, timeout: Duration) -> Result<Value> {
-        let r = self
-            .cdp
-            .send(
-                "Runtime.evaluate",
-                json!({ "expression": expression, "returnByValue": true, "awaitPromise": true, "userGesture": true }),
-                Some(&self.session),
-                timeout,
-            )
-            .await?;
+        let mut params =
+            json!({ "expression": expression, "returnByValue": true, "awaitPromise": true, "userGesture": true });
+        // In a frame: its main world. A cross-site frame is the main frame of its own
+        // session; a same-site one needs its context id.
+        if let Some(level) = self.frame.last() {
+            if self.shared.iframes.lock().unwrap().get(&level.frame_id) != Some(&level.session) {
+                let ctx = self.tab.state.lock().unwrap().frame_contexts.get(&level.frame_id).copied();
+                let ctx =
+                    ctx.ok_or_else(|| CoreError::unsupported("evaluate is not available in this nested frame"))?;
+                params["contextId"] = json!(ctx);
+            }
+        }
+        let session = self.context_session().to_string();
+        let r = self.cdp.send("Runtime.evaluate", params, Some(&session), timeout).await?;
         if let Some(ex) = r.get("exceptionDetails") {
             return Err(js_error(ex));
         }
         Ok(r["result"].get("value").cloned().unwrap_or(Value::Null))
+    }
+
+    fn tab_count(&self) -> usize {
+        self.shared.pages.lock().unwrap().len().max(1)
+    }
+
+    async fn tabs(&mut self) -> Result<Vec<TabInfo>> {
+        let mut pages = self.shared.pages.lock().unwrap().clone();
+        // Target info can lag behind (its title starts as the URL): read URL and
+        // title from the pages this session is attached to.
+        let active = self.page_state_of_tab().await.ok();
+        for tab in &self.others {
+            let expr =
+                json!({ "expression": "({ url: location.href, title: document.title })", "returnByValue": true });
+            let Ok(r) = self.cdp.send("Runtime.evaluate", expr, Some(&tab.session), Duration::from_secs(2)).await
+            else {
+                continue;
+            };
+            if let (Some(p), Ok(st)) = (
+                pages.iter_mut().find(|p| p.target_id == tab.target_id),
+                serde_json::from_value::<PageState>(r["result"]["value"].clone()),
+            ) {
+                p.url = st.url;
+                p.title = st.title;
+            }
+        }
+        Ok(pages
+            .iter()
+            .enumerate()
+            .map(|(index, p)| {
+                let is_active = p.target_id == self.tab.target_id;
+                let (url, title) = match (&active, is_active) {
+                    (Some(st), true) => (st.url.clone(), st.title.clone()),
+                    _ => (p.url.clone(), p.title.clone()),
+                };
+                let opener = p.opener.as_ref().and_then(|o| pages.iter().position(|q| &q.target_id == o));
+                TabInfo { index, url, title, active: is_active, opener }
+            })
+            .collect())
+    }
+
+    async fn new_tab(&mut self) -> Result<()> {
+        let mut params = json!({ "url": "about:blank" });
+        if let Some(ctx) = &self.daemon_context {
+            params["browserContextId"] = json!(ctx);
+        }
+        let r = self.cdp.send("Target.createTarget", params, None, CMD_TIMEOUT).await?;
+        let target = s(&r, "targetId");
+        {
+            let mut pages = self.shared.pages.lock().unwrap();
+            if !pages.iter().any(|p| p.target_id == target) {
+                pages.push(TargetSeen { target_id: target.clone(), url: "about:blank".into(), ..Default::default() });
+            }
+        }
+        self.activate(&target).await
+    }
+
+    async fn switch_tab(&mut self, index: usize) -> Result<()> {
+        let target = self.shared.pages.lock().unwrap().get(index).map(|p| p.target_id.clone());
+        let target = target.ok_or_else(|| CoreError::new(ErrorKind::NotFound, format!("no tab {index}")))?;
+        self.activate(&target).await
+    }
+
+    async fn close_tab(&mut self, index: usize) -> Result<()> {
+        let (target, opener, next) = {
+            let pages = self.shared.pages.lock().unwrap();
+            let p = pages.get(index).ok_or_else(|| CoreError::new(ErrorKind::NotFound, format!("no tab {index}")))?;
+            let next = pages.iter().rev().find(|q| q.target_id != p.target_id).map(|q| q.target_id.clone());
+            (p.target_id.clone(), p.opener.clone(), next)
+        };
+        if self.tab.target_id == target {
+            let alive = |id: &String| self.shared.pages.lock().unwrap().iter().any(|p| &p.target_id == id);
+            let to = opener.filter(alive).or(next).ok_or_else(|| CoreError::invalid("cannot close the last tab"))?;
+            self.activate(&to).await?;
+        }
+        if let Some(i) = self.others.iter().position(|t| t.target_id == target) {
+            let tab = self.others.remove(i);
+            tab.pump.abort();
+            self.shared.routes.lock().unwrap().remove(&tab.session);
+        }
+        self.cdp.send("Target.closeTarget", json!({ "targetId": target }), None, CMD_TIMEOUT).await?;
+        self.shared.pages.lock().unwrap().retain(|p| p.target_id != target);
+        Ok(())
+    }
+
+    async fn frames(&mut self) -> Result<Vec<FrameInfo>> {
+        fn walk(node: &Value, parent: Option<String>, out: &mut Vec<FrameInfo>) {
+            let f = &node["frame"];
+            let id = s(f, "id");
+            out.push(FrameInfo {
+                id: id.clone(),
+                name: s(f, "name"),
+                url: format!("{}{}", s(f, "url"), s(f, "urlFragment")),
+                parent: f.get("parentId").and_then(Value::as_str).map(str::to_string).or(parent),
+                out_of_process: false,
+            });
+            for child in node["childFrames"].as_array().into_iter().flatten() {
+                walk(child, Some(id.clone()), out);
+            }
+        }
+        let tree = self.send("Page.getFrameTree", json!({})).await?;
+        let mut out = Vec::new();
+        walk(&tree["frameTree"], None, &mut out);
+        // Cross-site iframes are documents in other processes: ask their sessions.
+        let iframes: Vec<(String, String)> =
+            self.shared.iframes.lock().unwrap().iter().map(|(f, s)| (f.clone(), s.clone())).collect();
+        for (frame_id, session) in iframes {
+            let Ok(sub) = self.cdp.send("Page.getFrameTree", json!({}), Some(&session), CMD_TIMEOUT).await else {
+                continue;
+            };
+            let mut found = Vec::new();
+            walk(&sub["frameTree"], None, &mut found);
+            for mut f in found {
+                f.out_of_process = true;
+                match out.iter_mut().find(|o| o.id == f.id) {
+                    Some(o) => {
+                        o.out_of_process = true;
+                        if o.url.is_empty() {
+                            o.url = f.url;
+                        }
+                        if o.name.is_empty() {
+                            o.name = f.name;
+                        }
+                    }
+                    None => {
+                        if f.id == frame_id && f.parent.is_none() {
+                            f.parent = Some(self.tab.target_id.clone());
+                        }
+                        out.push(f);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn enter_frame(&mut self, frame: Option<FrameRef>) -> Result<FrameInfo> {
+        let frame_id = match frame {
+            None => {
+                self.leave_frames();
+                let page = self.page_state().await?;
+                return Ok(FrameInfo {
+                    id: self.tab.target_id.clone(),
+                    name: String::new(),
+                    url: page.url,
+                    parent: None,
+                    out_of_process: false,
+                });
+            }
+            Some(FrameRef::Element(ref_id)) => {
+                let object = self.element_object(&ref_id).await?;
+                let node = self
+                    .cdp
+                    .send("DOM.describeNode", json!({ "objectId": object }), Some(self.context_session()), CMD_TIMEOUT)
+                    .await?;
+                let id = s(&node["node"], "frameId");
+                if id.is_empty() {
+                    return Err(CoreError::new(ErrorKind::NotActionable, format!("{ref_id} has no frame loaded yet")));
+                }
+                id
+            }
+            Some(FrameRef::Id(id)) => id,
+        };
+        // The chain of frames from the main frame down to this one.
+        let frames = self.frames().await?;
+        let mut chain = vec![frame_id.clone()];
+        while let Some(parent) = frames.iter().find(|f| f.id == *chain.last().unwrap()).and_then(|f| f.parent.clone()) {
+            if parent == self.tab.target_id {
+                break;
+            }
+            chain.push(parent);
+        }
+        if frames.iter().all(|f| f.id != frame_id) {
+            return Err(CoreError::new(ErrorKind::NotFound, "that frame is not in this tab (any more)"));
+        }
+        chain.reverse();
+        let mut levels: Vec<FrameLevel> = Vec::new();
+        for id in chain {
+            let parent_session =
+                levels.last().map(|l: &FrameLevel| l.session.clone()).unwrap_or(self.tab.session.clone());
+            let oopif = self.shared.iframes.lock().unwrap().get(&id).cloned();
+            let owner = self
+                .cdp
+                .send("DOM.getFrameOwner", json!({ "frameId": id }), Some(&parent_session), CMD_TIMEOUT)
+                .await
+                .map_err(|e| CoreError::new(ErrorKind::NotActionable, format!("frame not ready: {}", e.message)))?;
+            let owner =
+                owner["backendNodeId"].as_i64().ok_or_else(|| CoreError::backend("frame has no owner element"))?;
+            if let Some(session) = &oopif {
+                // A cross-site frame's session needs Page and Runtime before it can host a world.
+                for m in ["Page.enable", "Runtime.enable"] {
+                    let _ = self.cdp.send(m, json!({}), Some(session), CMD_TIMEOUT).await;
+                }
+            }
+            levels.push(FrameLevel {
+                frame_id: id,
+                session: oopif.unwrap_or_else(|| parent_session.clone()),
+                owner,
+                owner_session: parent_session,
+            });
+        }
+        self.frame = levels;
+        *self.frame_world.lock().unwrap() = None;
+        let state = match self.page_state().await {
+            Ok(st) => st,
+            Err(e) => {
+                self.leave_frames();
+                return Err(CoreError::new(ErrorKind::NotActionable, format!("frame not ready: {}", e.message)));
+            }
+        };
+        let info = frames.into_iter().find(|f| f.id == frame_id);
+        Ok(FrameInfo {
+            id: frame_id,
+            name: info.as_ref().map(|f| f.name.clone()).unwrap_or_default(),
+            url: state.url,
+            parent: info.as_ref().and_then(|f| f.parent.clone()),
+            out_of_process: info.is_some_and(|f| f.out_of_process),
+        })
     }
 
     async fn accessibility_tree(&mut self, max_nodes: usize) -> Result<Value> {
@@ -1096,7 +1618,7 @@ impl Backend for ChromiumBackend {
     }
 
     async fn click_effect(&mut self, max: Duration) -> Result<Option<Vec<String>>> {
-        let new_document = |me: &Self| me.state.lock().unwrap().worlds_created > me.worlds_at_click;
+        let new_document = |me: &Self| me.tab.state.lock().unwrap().worlds_created > me.worlds_at_click;
         // A document replaced since the click is the strongest possible effect; the
         // new document's helper knows nothing about the click, so ask the state first.
         if new_document(self) {
@@ -1111,15 +1633,15 @@ impl Backend for ChromiumBackend {
     }
 
     async fn console_errors(&mut self) -> Result<Vec<ConsoleEntry>> {
-        Ok(self.state.lock().unwrap().console.iter().cloned().collect())
+        Ok(self.tab.state.lock().unwrap().console.iter().cloned().collect())
     }
 
     async fn network_failures(&mut self) -> Result<Vec<NetworkFailure>> {
-        Ok(self.state.lock().unwrap().network.iter().cloned().collect())
+        Ok(self.tab.state.lock().unwrap().network.iter().cloned().collect())
     }
 
     async fn dialogs(&mut self) -> Result<Vec<DialogEvent>> {
-        Ok(self.state.lock().unwrap().dialogs.iter().cloned().collect())
+        Ok(self.tab.state.lock().unwrap().dialogs.iter().cloned().collect())
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -1133,7 +1655,11 @@ impl Backend for ChromiumBackend {
                 let _ = child.kill().await;
             }
         }
-        self.pump.abort();
+        self.router.abort();
+        self.tab.pump.abort();
+        for t in &self.others {
+            t.pump.abort();
+        }
         Ok(())
     }
 }

@@ -1,0 +1,69 @@
+{
+  "name": "tabs and frames",
+  "tests": [
+    {
+      "name": "follows a target=_blank link into a new tab",
+      "steps": [
+        { "op": "navigate", "url": "tabs.html" },
+        { "op": "click", "target": "Open about in a new tab" },
+        { "op": "switch_tab", "url_contains": "about.html" },
+        { "op": "expect", "condition": { "type": "title_equals", "value": "About" } },
+        { "op": "close_tab" },
+        { "op": "expect", "condition": { "type": "title_equals", "value": "Tabs" } }
+      ]
+    },
+    {
+      "name": "signs in through a popup",
+      "steps": [
+        { "op": "navigate", "url": "tabs.html" },
+        { "op": "click", "target": "Sign in with popup" },
+        { "op": "switch_tab", "last": true },
+        { "op": "expect", "condition": { "type": "title_equals", "value": "Sign in" } },
+        { "op": "fill", "target": "Email", "value": "ada@example.com" },
+        { "op": "switch_tab", "index": 0 },
+        { "op": "expect", "condition": { "type": "title_equals", "value": "Tabs" } }
+      ]
+    },
+    {
+      "name": "opens a tab itself",
+      "steps": [
+        { "op": "navigate", "url": "index.html" },
+        { "op": "new_tab", "url": "login.html" },
+        { "op": "expect", "condition": { "type": "title_equals", "value": "Sign in" } },
+        { "op": "switch_tab", "title_contains": "Todos" },
+        { "op": "expect", "condition": { "type": "visible", "target": "New todo" } }
+      ]
+    },
+    {
+      "name": "works inside a same-site iframe",
+      "steps": [
+        { "op": "navigate", "url": "frames.html" },
+        { "op": "switch_frame", "target": { "by": "css", "selector": "iframe[name=same]" } },
+        { "op": "fill", "target": "Name", "value": "Ada" },
+        { "op": "check", "target": "Agree" },
+        { "op": "click", "target": "Save", "expect": { "type": "text_visible", "text": "Saved Ada in same" } },
+        { "op": "switch_frame", "main": true },
+        { "op": "expect", "condition": { "type": "title_equals", "value": "Frames" } }
+      ]
+    },
+    {
+      "name": "works inside a cross-site iframe",
+      "steps": [
+        { "op": "navigate", "url": "frames.html" },
+        { "op": "switch_frame", "name": "cross" },
+        { "op": "fill", "target": "Name", "value": "Grace" },
+        { "op": "click", "target": "Save", "expect": { "type": "text_visible", "text": "Saved Grace in cross" } },
+        { "op": "evaluate", "expression": "location.hostname" }
+      ]
+    },
+    {
+      "name": "works inside a nested iframe",
+      "steps": [
+        { "op": "navigate", "url": "frames.html" },
+        { "op": "switch_frame", "url_contains": "who=inner" },
+        { "op": "fill", "target": "Name", "value": "Linus" },
+        { "op": "click", "target": "Save", "expect": { "type": "text_visible", "text": "Saved Linus in inner" } }
+      ]
+    }
+  ]
+}

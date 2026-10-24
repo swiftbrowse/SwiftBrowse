@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Frame form</title>
+<style>body { font: 14px system-ui, sans-serif; margin: 8px; }</style></head>
+<body>
+<label for="n">Name</label> <input id="n">
+<button id="save">Save</button>
+<input type="checkbox" id="ok"> <label for="ok">Agree</label>
+<p id="out" role="status"></p>
+<script>
+  const who = new URLSearchParams(location.search).get('who') || 'frame';
+  document.getElementById('save').addEventListener('click', () => {
+    document.getElementById('out').textContent = 'Saved ' + document.getElementById('n').value + ' in ' + who;
+  });
+</script>
+</body></html>

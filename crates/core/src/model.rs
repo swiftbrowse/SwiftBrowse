@@ -292,3 +292,30 @@ pub struct DialogEvent {
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
+
+/// An open tab of the session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TabInfo {
+    pub index: usize,
+    pub url: String,
+    pub title: String,
+    pub active: bool,
+    /// Index of the tab that opened this one (popup, `target=_blank`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opener: Option<usize>,
+}
+
+/// A frame of the active tab.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FrameInfo {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    pub url: String,
+    /// Parent frame id; `None` for the main frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Runs in its own process (cross-site iframe).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub out_of_process: bool,
+}

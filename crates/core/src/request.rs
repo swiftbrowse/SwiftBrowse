@@ -237,6 +237,64 @@ pub struct HistoryArgs {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NewTabArgs {
+    /// Page to open in the new tab; blank when omitted.
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub wait_until: WaitUntil,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchTabArgs {
+    /// Tab index from `list_tabs`.
+    #[serde(default)]
+    pub index: Option<usize>,
+    /// First tab whose URL contains this text. Waits for it to open (e.g. a popup).
+    #[serde(default)]
+    pub url_contains: Option<String>,
+    /// First tab whose title contains this text. Waits for it to open.
+    #[serde(default)]
+    pub title_contains: Option<String>,
+    /// The newest tab.
+    #[serde(default)]
+    pub last: bool,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CloseTabArgs {
+    /// Tab index from `list_tabs`; the active tab when omitted.
+    #[serde(default)]
+    pub index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchFrameArgs {
+    /// The `<iframe>` element, in the current frame.
+    #[serde(default)]
+    pub target: Option<Target>,
+    /// Frame name (`<iframe name>`), anywhere in the tab.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// First frame whose URL contains this text, anywhere in the tab.
+    #[serde(default)]
+    pub url_contains: Option<String>,
+    /// Back to the tab's main frame.
+    #[serde(default)]
+    pub main: bool,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EvaluateArgs {
@@ -296,6 +354,12 @@ pub enum Request {
     GoForward(HistoryArgs),
     Reload(HistoryArgs),
     Evaluate(EvaluateArgs),
+    NewTab(NewTabArgs),
+    ListTabs(NoArgs),
+    SwitchTab(SwitchTabArgs),
+    CloseTab(CloseTabArgs),
+    ListFrames(NoArgs),
+    SwitchFrame(SwitchFrameArgs),
     GetScreenshot(ScreenshotArgs),
     AssertPageState(AssertArgs),
     GetConsoleErrors(NoArgs),
@@ -323,6 +387,12 @@ impl Request {
             Request::GoForward(_) => "go_forward",
             Request::Reload(_) => "reload",
             Request::Evaluate(_) => "evaluate",
+            Request::NewTab(_) => "new_tab",
+            Request::ListTabs(_) => "list_tabs",
+            Request::SwitchTab(_) => "switch_tab",
+            Request::CloseTab(_) => "close_tab",
+            Request::ListFrames(_) => "list_frames",
+            Request::SwitchFrame(_) => "switch_frame",
             Request::GetScreenshot(_) => "get_screenshot",
             Request::AssertPageState(_) => "assert_page_state",
             Request::GetConsoleErrors(_) => "get_console_errors",
@@ -375,6 +445,12 @@ pub fn op_specs() -> Vec<OpSpec> {
         OpSpec { name: "go_forward", description: "Go forward one history entry and wait for the page to load.", schema: schema_of::<HistoryArgs> },
         OpSpec { name: "reload", description: "Reload the page and wait for it to load.", schema: schema_of::<HistoryArgs> },
         OpSpec { name: "evaluate", description: "Run a JavaScript expression in the page and return its JSON result. Only available when the session policy allows scripts (the test runner does; MCP needs --allow-evaluate).", schema: schema_of::<EvaluateArgs> },
+        OpSpec { name: "new_tab", description: "Open a new tab (optionally at a URL) in this session and make it active.", schema: schema_of::<NewTabArgs> },
+        OpSpec { name: "list_tabs", description: "Open tabs of this session, including popups and target=_blank pages, with the active one marked.", schema: schema_of::<NoArgs> },
+        OpSpec { name: "switch_tab", description: "Make a tab active by index, URL, title, or the newest one; waits for a matching tab to open (e.g. a popup).", schema: schema_of::<SwitchTabArgs> },
+        OpSpec { name: "close_tab", description: "Close a tab (the active one by default); the opener or the last tab becomes active.", schema: schema_of::<CloseTabArgs> },
+        OpSpec { name: "list_frames", description: "Frames (iframes) of the active tab with their names and URLs.", schema: schema_of::<NoArgs> },
+        OpSpec { name: "switch_frame", description: "Act inside an iframe (by its element, name or URL) until switch_frame with main=true or a navigation. Works for cross-site iframes.", schema: schema_of::<SwitchFrameArgs> },
         OpSpec { name: "get_screenshot", description: "Save a PNG screenshot to the evidence directory and return its path.", schema: schema_of::<ScreenshotArgs> },
         OpSpec { name: "assert_page_state", description: "Check URL, title, element, text, value or diagnostics conditions. Recorded in the test report.", schema: schema_of::<AssertArgs> },
         OpSpec { name: "get_console_errors", description: "Console errors and uncaught exceptions seen in this session.", schema: schema_of::<NoArgs> },

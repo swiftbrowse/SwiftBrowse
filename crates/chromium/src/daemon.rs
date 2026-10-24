@@ -647,19 +647,43 @@ impl Daemon {
             return;
         }
         let session = msg.get("sessionId").and_then(Value::as_str).map(str::to_string);
-        let st = self.state.lock().unwrap();
+        let mut st = self.state.lock().unwrap();
+        let method = msg["method"].as_str().unwrap_or_default();
         match session {
             Some(s) => {
-                if let Some(tx) = st.session_owner.get(&s).and_then(|c| st.clients.get(c)) {
+                let owner = st.session_owner.get(&s).copied();
+                // An owned page's cross-site iframes get sessions of their own.
+                if let (Some(owner), "Target.attachedToTarget") = (owner, method) {
+                    if let Some(child) = msg["params"]["sessionId"].as_str() {
+                        st.session_owner.insert(child.to_string(), owner);
+                    }
+                }
+                if let Some(tx) = owner.and_then(|c| st.clients.get(&c)) {
                     let _ = tx.send(text.to_string());
                 }
             }
             None => {
-                // Browser-level events only concern a client's own targets.
-                let target = msg["params"]["targetInfo"]["targetId"]
-                    .as_str()
-                    .or_else(|| msg["params"]["targetId"].as_str())
-                    .map(str::to_string);
+                // Browser-level events only concern a client's own targets. A new
+                // target in a client's browser context (a popup) becomes its own.
+                let info = &msg["params"]["targetInfo"];
+                let target =
+                    info["targetId"].as_str().or_else(|| msg["params"]["targetId"].as_str()).map(str::to_string);
+                if method == "Target.targetCreated" {
+                    let ctx_owner = info["browserContextId"].as_str().and_then(|c| st.context_owner.get(c).copied());
+                    if let (Some(owner), Some(t)) = (ctx_owner, &target) {
+                        st.target_owner.entry(t.clone()).or_insert(owner);
+                    }
+                }
+                if method == "Target.targetDestroyed" {
+                    if let Some(t) = &target {
+                        if let Some(owner) = st.target_owner.remove(t) {
+                            if let Some(tx) = st.clients.get(&owner) {
+                                let _ = tx.send(text.to_string());
+                            }
+                        }
+                    }
+                    return;
+                }
                 if let Some(owner) = target.and_then(|t| st.target_owner.get(&t).copied()) {
                     if let Some(tx) = st.clients.get(&owner) {
                         let _ = tx.send(text.to_string());
@@ -813,6 +837,9 @@ pub async fn run(options: DaemonOptions) -> Result<()> {
             if let Ok(v) = d.internal("Browser.getVersion", json!({})).await {
                 *d.version.lock().unwrap() = v["product"].as_str().unwrap_or_default().to_string();
             }
+            // Tabs a page opens (popups, target=_blank) are forwarded to the client
+            // that owns the page's browser context.
+            let _ = d.internal("Target.setDiscoverTargets", json!({ "discover": true })).await;
         });
     }
 

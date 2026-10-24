@@ -256,7 +256,7 @@ fn parse_step(step: &Value, base: Option<&url::Url>, expect_timeout_ms: u64) -> 
     if op == "assert_page_state" && !obj.contains_key("timeout_ms") {
         obj.insert("timeout_ms".into(), json!(expect_timeout_ms));
     }
-    if op == "navigate" {
+    if op == "navigate" || op == "new_tab" {
         if let (Some(Value::String(u)), Some(base)) = (obj.get("url"), base) {
             if url::Url::parse(u).is_err() {
                 let joined = base.join(u).map_err(|e| format!("cannot resolve {u:?} against the base URL: {e}"))?;

@@ -70,6 +70,34 @@ pub trait Backend: Send {
         Err(CoreError::unsupported("script evaluation is not available on this backend"))
     }
 
+    /// Number of open tabs, without asking the browser.
+    fn tab_count(&self) -> usize {
+        1
+    }
+    /// Open tabs, in creation order.
+    async fn tabs(&mut self) -> Result<Vec<TabInfo>> {
+        Err(CoreError::unsupported("tabs are not available on this backend"))
+    }
+    /// Opens a blank tab and makes it the active one.
+    async fn new_tab(&mut self) -> Result<()> {
+        Err(CoreError::unsupported("tabs are not available on this backend"))
+    }
+    async fn switch_tab(&mut self, _index: usize) -> Result<()> {
+        Err(CoreError::unsupported("tabs are not available on this backend"))
+    }
+    /// Closes a tab; when it was active, the opener (or the last tab) becomes active.
+    async fn close_tab(&mut self, _index: usize) -> Result<()> {
+        Err(CoreError::unsupported("tabs are not available on this backend"))
+    }
+    /// Every frame of the active tab, main frame first.
+    async fn frames(&mut self) -> Result<Vec<FrameInfo>> {
+        Err(CoreError::unsupported("frames are not available on this backend"))
+    }
+    /// Makes later operations act inside this frame (`None`: back to the main frame).
+    async fn enter_frame(&mut self, _frame: Option<FrameRef>) -> Result<FrameInfo> {
+        Err(CoreError::unsupported("frames are not available on this backend"))
+    }
+
     async fn accessibility_tree(&mut self, _max_nodes: usize) -> Result<Value> {
         Err(CoreError::unsupported("accessibility tree is not available on this backend"))
     }
@@ -93,6 +121,15 @@ pub trait Backend: Send {
     }
 
     async fn close(&mut self) -> Result<()>;
+}
+
+/// Which frame to enter.
+#[derive(Debug, Clone)]
+pub enum FrameRef {
+    /// The `<iframe>` element with this ref, in the current frame.
+    Element(String),
+    /// A frame id from [`Backend::frames`].
+    Id(String),
 }
 
 /// Starts backends for new sessions.

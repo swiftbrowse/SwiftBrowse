@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Frames</title>
+<style>body { font: 16px system-ui, sans-serif; margin: 20px; } iframe { width: 420px; height: 170px; border: 6px solid #ccc; display: block; margin: 12px 0; }</style>
+</head>
+<body>
+<h1>Frames</h1>
+<div style="height: 500px">Spacer so frames start below the fold.</div>
+<iframe name="same" title="Same-site form" src="frame-form.html?who=same"></iframe>
+<iframe name="cross" title="Cross-site form" id="cross"></iframe>
+<iframe name="outer" title="Nested frames" src="frame-outer.html" style="height: 260px"></iframe>
+<script>
+  // Same port, other host name: a different site, so Chromium runs it in another process.
+  const other = location.hostname === '127.0.0.1' ? 'localhost' : '127.0.0.1';
+  document.getElementById('cross').src = location.href.replace(location.hostname, other).replace('frames.html', 'frame-form.html?who=cross');
+</script>
+</body></html>

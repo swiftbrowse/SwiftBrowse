@@ -42,7 +42,7 @@ fn example_suite_passes_in_parallel() {
         run(&["test", "tests", "--serve", "site", "-j", "4", "--output-dir", out_dir.to_str().unwrap()], &examples);
     assert_eq!(code, 0, "{stdout}");
     let r = results(&out_dir);
-    assert_eq!(r["summary"]["passed"], 12, "{stdout}");
+    assert_eq!(r["summary"]["passed"], 18, "{stdout}");
     assert_eq!(r["summary"]["failed"], 0);
 }
 

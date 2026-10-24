@@ -17,7 +17,7 @@ pub mod request;
 pub mod result;
 pub mod session;
 
-pub use backend::{Backend, BackendFactory, SessionOptions};
+pub use backend::{Backend, BackendFactory, FrameRef, SessionOptions};
 pub use capability::{Capability, CapabilityReport, Support};
 pub use error::{CoreError, ErrorKind, Result};
 pub use locator::{Locator, Target};

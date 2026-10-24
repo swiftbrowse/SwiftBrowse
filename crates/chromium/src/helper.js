@@ -581,6 +581,7 @@
     clickDone,
     pointAt,
     readText: (r) => textOf(get(r)),
+    element: (r) => get(r),
     // Identifies the current document: timeOrigin changes with every new document.
     docState: () => ({ origin: performance.timeOrigin, url: location.href, ready: document.readyState }),
     focus: (r) => focus(r, false, false),
