@@ -1,0 +1,204 @@
+{
+  "meta": {
+    "browser": "shell",
+    "chromium": "/opt/pw-browsers/chromium_headless_shell-1243/chrome-headless-shell-linux64/chrome-headless-shell",
+    "playwright_test": "1.64.0",
+    "cpus": 4,
+    "iterations": 5,
+    "node": "v22.22.0"
+  },
+  "rows": [
+    {
+      "tests": 29,
+      "workers": 1,
+      "playwright test": {
+        "median_ms": 10454,
+        "min_ms": 10211,
+        "runs": [
+          10730,
+          10454,
+          10762,
+          10419,
+          10211
+        ]
+      },
+      "swiftbrowse test": {
+        "median_ms": 4519,
+        "min_ms": 4399,
+        "runs": [
+          4519,
+          4399,
+          4808,
+          4439,
+          4542
+        ]
+      },
+      "swiftbrowse sdk": {
+        "median_ms": 5065,
+        "min_ms": 5014,
+        "runs": [
+          5065,
+          5077,
+          5205,
+          5014,
+          5052
+        ]
+      },
+      "swiftbrowse test (first run)": {
+        "median_ms": 4657,
+        "min_ms": 4503,
+        "runs": [
+          4698,
+          4523,
+          4725,
+          4503,
+          4657
+        ]
+      }
+    },
+    {
+      "tests": 29,
+      "workers": 4,
+      "playwright test": {
+        "median_ms": 6511,
+        "min_ms": 6354,
+        "runs": [
+          6598,
+          6581,
+          6511,
+          6506,
+          6354
+        ]
+      },
+      "swiftbrowse test": {
+        "median_ms": 2150,
+        "min_ms": 2054,
+        "runs": [
+          2194,
+          2054,
+          2137,
+          2172,
+          2150
+        ]
+      },
+      "swiftbrowse sdk": {
+        "median_ms": 2814,
+        "min_ms": 2787,
+        "runs": [
+          2814,
+          2787,
+          2856,
+          2809,
+          2817
+        ]
+      },
+      "swiftbrowse test (first run)": {
+        "median_ms": 2351,
+        "min_ms": 2301,
+        "runs": [
+          2351,
+          2496,
+          2432,
+          2338,
+          2301
+        ]
+      }
+    },
+    {
+      "tests": 145,
+      "workers": 1,
+      "playwright test": {
+        "median_ms": 46427,
+        "min_ms": 45712,
+        "runs": [
+          45814,
+          46857,
+          45712,
+          46427,
+          46525
+        ]
+      },
+      "swiftbrowse test": {
+        "median_ms": 22900,
+        "min_ms": 22879,
+        "runs": [
+          23398,
+          22900,
+          22879,
+          22881,
+          23072
+        ]
+      },
+      "swiftbrowse sdk": {
+        "median_ms": 24188,
+        "min_ms": 24072,
+        "runs": [
+          24181,
+          24072,
+          24306,
+          24227,
+          24188
+        ]
+      },
+      "swiftbrowse test (first run)": {
+        "median_ms": 22973,
+        "min_ms": 22801,
+        "runs": [
+          22991,
+          22973,
+          22898,
+          23491,
+          22801
+        ]
+      }
+    },
+    {
+      "tests": 145,
+      "workers": 4,
+      "playwright test": {
+        "median_ms": 23904,
+        "min_ms": 23417,
+        "runs": [
+          24219,
+          23692,
+          24908,
+          23904,
+          23417
+        ]
+      },
+      "swiftbrowse test": {
+        "median_ms": 10343,
+        "min_ms": 10255,
+        "runs": [
+          10343,
+          10478,
+          10315,
+          10393,
+          10255
+        ]
+      },
+      "swiftbrowse sdk": {
+        "median_ms": 12034,
+        "min_ms": 11523,
+        "runs": [
+          12034,
+          12512,
+          12261,
+          12017,
+          11523
+        ]
+      },
+      "swiftbrowse test (first run)": {
+        "median_ms": 10699,
+        "min_ms": 10314,
+        "runs": [
+          10314,
+          10840,
+          11182,
+          10342,
+          10699
+        ]
+      }
+    }
+  ]
+}

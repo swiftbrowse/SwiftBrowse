@@ -82,16 +82,16 @@ A test file (see [`examples/e2e/tests`](examples/e2e/tests)):
 
 ### Benchmark vs Playwright Test
 
-The same 12 tests ([`examples/e2e/tests`](examples/e2e/tests) and the idiomatic Playwright version in [`bench/e2e/specs`](bench/e2e/specs)), the same app server, the same Chromium headless-shell binary, Playwright Test 1.64.0 with `fullyParallel`. Each run is a whole CLI command, start to exit, as CI runs it; median of 5 interleaved runs on 4 CPUs (`node bench/e2e.mjs`). "First run" means no daemon was running, which is what a fresh CI job gets.
+The same 29 tests three ways: JSON flows run by `swiftbrowse test` ([`examples/e2e/tests`](examples/e2e/tests)), hand-written TypeScript with the SDK under `node:test` ([`bench/e2e/sdk`](bench/e2e/sdk)), and idiomatic Playwright Test with a setup project and `fullyParallel` ([`bench/e2e/specs`](bench/e2e/specs)). They cover forms, filtering, hover menus, back/forward, reloads, `target=_blank` and popup tabs, same-site, cross-site and nested iframes, file upload, network mocking (data, errors, aborts, delays, `times`, POST checks) and a saved login. Same app server, same Chromium headless-shell binary, Playwright Test 1.64.0. Each run is a whole CLI command, start to exit, as CI runs it; median of 5 interleaved runs on 4 CPUs (`node bench/e2e.mjs`). At most `workers` tests run at once in every tool. "First run" means no warm browser was running, which is what a fresh CI job gets. Every suite passed every run.
 
-| Tests | Workers | Playwright Test | SwiftBrowse | SwiftBrowse, first run | Faster by |
+| Tests | Workers | Playwright Test | `swiftbrowse test` | SwiftBrowse SDK (node:test) | `swiftbrowse test`, first run |
 |---|---|---|---|---|---|
-| 12 | 1 | 5987 ms | **2212 ms** | 2330 ms | 2.6–2.7× |
-| 12 | 4 | 4361 ms | **1153 ms** | 1263 ms | 3.5–3.8× |
-| 60 | 1 | 27464 ms | **11463 ms** | 11765 ms | 2.3–2.4× |
-| 60 | 4 | 18893 ms | **5965 ms** | 5962 ms | 3.2× |
+| 29 | 1 | 10454 ms | **4519 ms** (2.3×) | **5065 ms** (2.1×) | **4657 ms** (2.2×) |
+| 29 | 4 | 6511 ms | **2150 ms** (3.0×) | **2814 ms** (2.3×) | **2351 ms** (2.8×) |
+| 145 | 1 | 46427 ms | **22900 ms** (2.0×) | **24188 ms** (1.9×) | **22973 ms** (2.0×) |
+| 145 | 4 | 23904 ms | **10343 ms** (2.3×) | **12034 ms** (2.0×) | **10699 ms** (2.2×) |
 
-Where the time goes: Playwright Test starts Node, loads and transforms the test files, and starts a browser per worker before the first test; SwiftBrowse is one native process that attaches each test to a prepared browser context in a few milliseconds. Both suites pass 12/12 in every run. One machine, one small app: a large suite on a slow app will be dominated by the app's own time.
+Where the time goes: Playwright Test starts Node, transforms the test files and starts a browser per worker; SwiftBrowse is a native process whose sessions attach to warm browsers (one per parallel worker) in milliseconds. A good part of the remaining time is the demo app's own deliberate waits (120 ms to add an item, 150 ms to sign in, 600 ms in the loading-state test), which no tool can skip. The SDK pays for a Node process per test file. One machine, one small app: on a slow app, the app's own time dominates.
 
 ## Tests in code: TypeScript and Python SDKs
 
