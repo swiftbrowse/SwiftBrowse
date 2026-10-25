@@ -15,6 +15,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.resolve(process.argv[2] || path.join(here, '../target/release/swiftbrowse'));
 const OUT = path.join(here, 'dist');
 const REPO = 'https://github.com/swiftbrowse/SwiftBrowse';
+// Where the site is hosted: absolute links in docs.md and llms.txt point here.
+const SITE = 'https://steady-ember-82q7.here.now/';
+const SUMMARY = 'SwiftBrowse is the AI browser for browser automation and end-to-end testing: a native engine (Rust, driving Chromium over the DevTools Protocol) with one contract across a JSON test runner (`swiftbrowse test`), TypeScript and Python SDKs, and an MCP server for AI agents.';
 
 // Sidebar order. `generated` pages are written below instead of read from pages/.
 const NAV = [
@@ -190,6 +193,28 @@ function cliPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Markdown outputs
+
+// The landing page's HTML cards become a Markdown list.
+function plainMarkdown(md) {
+  return md
+    .replace(/<a href="([a-z0-9-]+)\.html"><b>(.+?)<\/b><span>(.+?)<\/span><\/a>/g, '- [$2]($1.md): $3')
+    .replace(/^<\/?div[^>]*>\n/gm, '');
+}
+
+// Each page's `#` title becomes `##` inside the consolidated file (code blocks untouched).
+function shiftHeadings(md) {
+  let fence = false;
+  return md.split('\n').map((line) => {
+    if (line.startsWith('```')) fence = !fence;
+    return !fence && /^#{1,5} /.test(line) ? `#${line}` : line;
+  }).join('\n');
+}
+
+// Links between pages point at the hosted site, so they work from one file.
+const absoluteLinks = (md) => md.replace(/\]\(([a-z0-9-]+)\.md(#[^)]*)?\)/g, (_, slug, hash) => `](${SITE}${slug}.html${hash || ''})`);
+
+// ---------------------------------------------------------------------------
 // Layout
 
 const CSS = fs.readFileSync(path.join(here, 'theme.css'), 'utf8');
@@ -227,7 +252,7 @@ function page({ slug, title, html, headings }) {
   <main>
     <article>${html}</article>
     ${pager}
-    <footer>SwiftBrowse ${version} · Apache-2.0 · <a href="${REPO}/issues">Report an issue</a> · <a href="${REPO}/edit/main/docs/pages/${slug}.md">Edit this page</a></footer>
+    <footer>SwiftBrowse ${version} · Apache-2.0 · <a href="${REPO}/issues">Report an issue</a> · <a href="${slug}.md">This page as Markdown</a> · <a href="docs.md">All docs as Markdown</a> · <a href="llms.txt">llms.txt</a></footer>
   </main>
   <aside class="toc">${toc.length > 1 ? `<div class="toc-title">On this page</div>${toc.map((h) => `<a href="#${h.id}">${escapeHtml(h.text)}</a>`).join('')}` : ''}</aside>
 </div>
@@ -242,6 +267,7 @@ function page({ slug, title, html, headings }) {
 fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(OUT, { recursive: true });
 const search = [];
+const sources = [];
 for (const [, items] of NAV) {
   for (const [slug, label, kind] of items) {
     const md = kind === 'generated'
@@ -250,6 +276,8 @@ for (const [, items] of NAV) {
     const { html, headings } = render(md);
     const title = (md.match(/^# (.+)$/m) || [, label])[1].replace(/`/g, '');
     fs.writeFileSync(path.join(OUT, `${slug}.html`), page({ slug, title, html, headings }));
+    fs.writeFileSync(path.join(OUT, `${slug}.md`), plainMarkdown(md));
+    sources.push({ slug, label, title, md });
     search.push({ u: `${slug}.html`, t: title, p: label });
     for (const h of headings) {
       const op = slug === 'operations' && ops.find((o) => o.name === h.text);
@@ -258,4 +286,15 @@ for (const [, items] of NAV) {
   }
 }
 fs.writeFileSync(path.join(OUT, 'search.json'), JSON.stringify(search));
+
+// The whole documentation as one Markdown file (docs.md), and as llms.txt /
+// llms-full.txt for language models: a summary and page index, then every page.
+const index = NAV.map(([group, items]) => `### ${group}\n\n${items
+  .map(([slug, label]) => `- [${label}](${SITE}${slug}.html)`).join('\n')}`).join('\n\n');
+const full = sources.map(({ slug, md }) => `<!-- ${SITE}${slug}.html -->\n\n${absoluteLinks(shiftHeadings(plainMarkdown(md)))}`).join('\n\n---\n\n');
+const docsMd = `# SwiftBrowse documentation (version ${version})\n\n> ${SUMMARY}\n\nThe complete documentation in one file. Online: ${SITE} · Source: ${REPO}\n\n${full}\n`;
+fs.writeFileSync(path.join(OUT, 'docs.md'), docsMd);
+const llms = `# SwiftBrowse\n\n> ${SUMMARY}\n\nVersion ${version}. Install with \`npm install swiftbrowse\` or \`pip install swiftbrowse\`, then \`npx playwright install chromium chromium-headless-shell\` for a browser. The complete text of every page follows the index below; it is also published as one Markdown file at ${SITE}docs.md.\n\n## Pages\n\n${index}\n\n## Full documentation\n\n${full}\n`;
+fs.writeFileSync(path.join(OUT, 'llms.txt'), llms);
+fs.writeFileSync(path.join(OUT, 'llms-full.txt'), llms);
 console.log(`built ${search.filter((s) => !s.u.includes('#')).length} pages for SwiftBrowse ${version} into ${path.relative(process.cwd(), OUT) || '.'}`);
