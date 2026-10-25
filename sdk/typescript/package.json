@@ -26,12 +26,13 @@
   "bin": {
     "swiftbrowse": "bin/swiftbrowse.js"
   },
+  "bugs": "https://github.com/swiftbrowse/swiftbrowse/issues",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/swiftbrowse/swiftbrowse.git",
     "directory": "sdk/typescript"
   },
-  "homepage": "https://github.com/swiftbrowse/swiftbrowse#readme",
+  "homepage": "https://steady-ember-82q7.here.now/",
   "keywords": [
     "browser",
     "automation",

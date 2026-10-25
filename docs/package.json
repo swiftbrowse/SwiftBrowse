@@ -1,0 +1,12 @@
+{
+  "name": "swiftbrowse-docs",
+  "private": true,
+  "type": "module",
+  "description": "The SwiftBrowse documentation site: Markdown pages plus references generated from the binary.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "marked": "15.0.12"
+  }
+}

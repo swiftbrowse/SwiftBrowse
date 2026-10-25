@@ -26,6 +26,9 @@ Name: swiftbrowse
 Version: {version}
 Summary: The AI browser for browser automation and end-to-end testing: Python SDK
 Home-page: https://github.com/swiftbrowse/swiftbrowse
+Project-URL: Documentation, https://steady-ember-82q7.here.now/
+Project-URL: Source, https://github.com/swiftbrowse/swiftbrowse
+Project-URL: Issues, https://github.com/swiftbrowse/swiftbrowse/issues
 License: Apache-2.0
 Keywords: browser,automation,testing,e2e,playwright,mcp,ai-agents,chromium
 Requires-Python: >=3.8

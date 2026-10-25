@@ -2,6 +2,8 @@
 
 **The AI browser for browser automation and end-to-end testing.** One contract across MCP, CLI and the TypeScript and Python SDKs: agents drive it through MCP, and the same steps run as CI tests, written as JSON flows or in code. Rust core, Chromium backend over the DevTools Protocol.
 
+**📖 Documentation: https://steady-ember-82q7.here.now/** (source in [`docs/`](docs))
+
 > **Status: Phase 1 of the product specification roadmap, plus the MCP server and CLI from Phase 4.** The cloud/headless Chromium path works and is tested. The TypeScript and Python SDKs work against the same engine. The Tauri/Wry desktop shell is **not started**. See [What exists](#what-exists).
 
 ## Quick start

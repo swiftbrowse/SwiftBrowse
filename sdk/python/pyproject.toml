@@ -14,6 +14,8 @@ keywords = ["browser", "automation", "testing", "e2e", "playwright", "mcp", "ai-
 
 [project.urls]
 Homepage = "https://github.com/swiftbrowse/swiftbrowse"
+Documentation = "https://steady-ember-82q7.here.now/"
+Issues = "https://github.com/swiftbrowse/swiftbrowse/issues"
 
 [project.scripts]
 swiftbrowse = "swiftbrowse.__main__:main"
